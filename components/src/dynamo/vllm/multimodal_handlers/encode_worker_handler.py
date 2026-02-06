@@ -19,7 +19,7 @@ from vllm.multimodal.hasher import MultiModalHasher
 from vllm.sampling_params import SamplingParams
 
 import dynamo.nixl_connect as connect
-from dynamo.runtime import Client, DistributedRuntime
+from dynamo.runtime import DistributedRuntime
 
 from ..multimodal_utils import (
     ImageLoader,
@@ -64,9 +64,7 @@ class EncodeWorkerHandler:
     def __init__(
         self,
         engine_args: AsyncEngineArgs,
-        pd_worker_client: Client,
     ) -> None:
-        self.pd_worker_client = pd_worker_client
         self.engine_args = engine_args
         self.model = self.engine_args.model
 
