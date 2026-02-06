@@ -62,17 +62,10 @@ class DynamoVllmArgGroup(ArgGroup):
         # Multimodal
         add_negatable_bool_argument(
             g,
-            flag_name="--multimodal-processor",
-            env_var="DYN_VLLM_MULTIMODAL_PROCESSOR",
+            flag_name="--dyn-route-to-encoder",
+            env_var="DYN_VLLM_ROUTE_TO_ENCODER",
             default=False,
-            help="Run as multimodal processor component for handling multimodal requests.",
-        )
-        add_negatable_bool_argument(
-            g,
-            flag_name="--ec-processor",
-            env_var="DYN_VLLM_EC_PROCESSOR",
-            default=False,
-            help="Run as ECConnector processor (routes multimodal requests to encoder then PD workers).",
+            help="Enable routing to separate encoder workers for multimodal processing.",
         )
         add_negatable_bool_argument(
             g,
@@ -167,7 +160,7 @@ class DynamoVllmArgGroup(ArgGroup):
         )
         add_negatable_bool_argument(
             g,
-            flag_name="--ec-consumer-mode",
+            flag_name="--dyn-ec-consumer-mode",
             env_var="DYN_VLLM_EC_CONSUMER_MODE",
             default=False,
             help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers).",
@@ -200,8 +193,7 @@ class DynamoVllmConfig(ConfigBase):
     sleep_mode_level: int
 
     # Multimodal
-    multimodal_processor: bool
-    ec_processor: bool
+    route_to_encoder: bool
     multimodal_encode_worker: bool
     multimodal_worker: bool
     multimodal_decode_worker: bool
@@ -237,11 +229,13 @@ class DynamoVllmConfig(ConfigBase):
             )
 
     def _count_multimodal_roles(self) -> int:
-        """Return the number of multimodal roles set (0 or 1 allowed)."""
+        """Return the number of multimodal worker roles set (0 or 1 allowed).
+
+        Note: --dyn-route-to-encoder and --dyn-ec-consumer-mode are modifier
+        flags, not worker types.
+        """
         return sum(
             [
-                bool(self.multimodal_processor),
-                bool(self.ec_processor),
                 bool(self.multimodal_encode_worker),
                 bool(self.multimodal_worker),
                 bool(self.multimodal_decode_worker),
@@ -254,10 +248,9 @@ class DynamoVllmConfig(ConfigBase):
         """Ensure only one multimodal role is set at a time."""
         if self._count_multimodal_roles() > 1:
             raise ValueError(
-                "Only one multimodal role can be set at a time: "
-                "multimodal-processor, ec-processor, multimodal-encode-worker, "
-                "multimodal-worker, multimodal-decode-worker, "
-                "multimodal-encode-prefill-worker, vllm-native-encoder-worker"
+                "Use only one of --multimodal-encode-worker, --multimodal-worker, "
+                "--multimodal-decode-worker, --multimodal-encode-prefill-worker, "
+                "or --vllm-native-encoder-worker"
             )
 
     def _validate_multimodal_requires_flag(self) -> None:
