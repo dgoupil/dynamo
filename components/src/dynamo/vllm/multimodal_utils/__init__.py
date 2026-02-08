@@ -21,7 +21,8 @@ from dynamo.vllm.multimodal_utils.model import (
 )
 from dynamo.vllm.multimodal_utils.prefill_worker_utils import (
     accumulate_embeddings,
-    fetch_embeddings_from_encode_workers,
+    fetch_embeddings_via_local_cache,
+    fetch_embeddings_via_stream,
     load_embeddings,
 )
 from dynamo.vllm.multimodal_utils.protocol import (
@@ -53,6 +54,7 @@ __all__ = [
     "MyRequestOutput",
     "vLLMMultimodalRequest",
     "accumulate_embeddings",
-    "fetch_embeddings_from_encode_workers",
+    "fetch_embeddings_via_local_cache",
+    "fetch_embeddings_via_stream",
     "load_embeddings",
 ]

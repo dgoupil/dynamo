@@ -7,6 +7,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import torch
 
 from dynamo.common.memory.multimodal_embedding_cache_manager import (
     MultimodalEmbeddingCacheManager,
@@ -36,7 +37,6 @@ def _make_config(
     is_prefill_worker: bool = False,
     enable_multimodal: bool = True,
     multimodal_embedding_cache_capacity_gb: float = 0,
-    ec_consumer_mode: bool = False,
 ) -> MagicMock:
     """Create a mock Config with the fields used by MultimodalPDWorkerHandler."""
     config = MagicMock()
@@ -151,7 +151,7 @@ class TestBuildRequestFromFrontend:
 
     @pytest.mark.asyncio
     async def test_with_encode_worker_calls_fetch(self):
-        """With encode client -> delegates to fetch_embeddings_from_encode_workers."""
+        """With encode client -> delegates to fetch_embeddings_via_stream."""
         mock_client = MagicMock()
         handler = _make_handler(encode_worker_client=mock_client)
         handler.default_sampling_params = {}
@@ -159,7 +159,7 @@ class TestBuildRequestFromFrontend:
         fake_group = MultiModalGroup(multimodal_input=MultiModalInput())
         with patch.object(
             mod,
-            "fetch_embeddings_from_encode_workers",
+            "fetch_embeddings_via_stream",
             new_callable=AsyncMock,
             return_value=[fake_group],
         ) as mock_fetch:
@@ -168,6 +168,89 @@ class TestBuildRequestFromFrontend:
 
         mock_fetch.assert_awaited_once()
         assert result.multimodal_inputs == [fake_group]
+
+    @pytest.mark.asyncio
+    async def test_with_cache_calls_fetch_via_local_cache(self):
+        """With cache enabled -> delegates to fetch_embeddings_via_local_cache."""
+        mock_client = MagicMock()
+        config = _make_config(multimodal_embedding_cache_capacity_gb=1.0)
+        handler = _make_handler(config=config, encode_worker_client=mock_client)
+        handler.default_sampling_params = {}
+
+        fake_group = MultiModalGroup(multimodal_input=MultiModalInput())
+        with patch.object(
+            mod,
+            "fetch_embeddings_via_local_cache",
+            new_callable=AsyncMock,
+            return_value=[fake_group],
+        ) as mock_cache_fetch:
+            raw = _make_raw_frontend_request(image_urls=["http://img.png"])
+            result = await handler._build_request_from_frontend(raw)
+
+        mock_cache_fetch.assert_awaited_once()
+        assert result.multimodal_inputs == [fake_group]
+
+    @pytest.mark.asyncio
+    async def test_without_cache_calls_fetch_directly(self):
+        """With encode client but no cache -> delegates to fetch_embeddings_via_stream."""
+        mock_client = MagicMock()
+        config = _make_config(multimodal_embedding_cache_capacity_gb=0)
+        handler = _make_handler(config=config, encode_worker_client=mock_client)
+        handler.default_sampling_params = {}
+
+        fake_group = MultiModalGroup(multimodal_input=MultiModalInput())
+        with (
+            patch.object(
+                mod,
+                "fetch_embeddings_via_local_cache",
+                new_callable=AsyncMock,
+            ) as mock_cache_fetch,
+            patch.object(
+                mod,
+                "fetch_embeddings_via_stream",
+                new_callable=AsyncMock,
+                return_value=[fake_group],
+            ) as mock_fetch,
+        ):
+            raw = _make_raw_frontend_request(image_urls=["http://img.png"])
+            await handler._build_request_from_frontend(raw)
+
+        mock_cache_fetch.assert_not_awaited()
+        mock_fetch.assert_awaited_once()
+
+
+class TestLoadMultimodalDataWithCache:
+    @pytest.mark.asyncio
+    async def test_cached_embedding_path(self):
+        """_load_multimodal_data uses cached_embedding when set on a group."""
+        handler = _make_handler()
+
+        tensor = torch.randn(1, 10, dtype=torch.float16)
+        group = MultiModalGroup(
+            multimodal_input=MultiModalInput(),
+            cached_embedding=tensor,
+            image_grid_thw=None,
+        )
+
+        from vllm.sampling_params import SamplingParams
+
+        request = vLLMMultimodalRequest(
+            engine_prompt=PatchedTokensPrompt(prompt_token_ids=[1, 2, 3]),
+            sampling_params=SamplingParams(),
+            request_id="req-1",
+            multimodal_inputs=[group],
+        )
+
+        with patch.object(
+            mod,
+            "accumulate_embeddings",
+        ) as mock_accum:
+            await handler._load_multimodal_data(request)
+
+        mock_accum.assert_called_once()
+        call_args = mock_accum.call_args
+        assert torch.equal(call_args[0][3], tensor)
+        assert call_args[0][4] is None
 
 
 class TestGenerateAgg:

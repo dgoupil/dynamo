@@ -10,8 +10,13 @@ import torch
 from vllm.sampling_params import SamplingParams as VllmSamplingParams
 
 import dynamo.nixl_connect as connect
+from dynamo.common.memory.multimodal_embedding_cache_manager import (
+    CachedEmbedding,
+    MultimodalEmbeddingCacheManager,
+)
 from dynamo.runtime import Client
 
+from .encode_utils import get_embedding_hash
 from .model import construct_mm_data
 from .protocol import (
     MultiModalGroup,
@@ -127,7 +132,7 @@ def accumulate_embeddings(
             )
 
 
-async def fetch_embeddings_from_encode_workers(
+async def fetch_embeddings_via_stream(
     encode_worker_client: Client,
     image_urls: List[str],
     request_id: str,
@@ -184,3 +189,66 @@ async def fetch_embeddings_from_encode_workers(
                 multimodal_groups.extend(output.multimodal_inputs)
 
     return multimodal_groups
+
+
+async def fetch_embeddings_via_local_cache(
+    cache: MultimodalEmbeddingCacheManager,
+    encode_worker_client: Client,
+    image_urls: list[str],
+    request_id: str,
+    embeddings_dtype: torch.dtype,
+    embeddings_device: str,
+    connector: connect.Connector | None,
+) -> list[MultiModalGroup]:
+    """Fetch embeddings with local cache lookup.
+
+    For each URL, check the embedding cache first. Only URLs with cache
+    misses are sent to encode workers. Results are cached for future use.
+    """
+    results: list[MultiModalGroup | None] = [None] * len(image_urls)
+    uncached: list[tuple[int, str]] = []
+
+    for idx, url in enumerate(image_urls):
+        key = get_embedding_hash(url)
+        cached = cache.get(key)
+        if cached is not None:
+            logger.debug(f"[{request_id}] Cache hit for URL index {idx}")
+            results[idx] = MultiModalGroup(
+                cached_embedding=cached.tensor,
+                image_grid_thw=cached.image_grid_thw,
+            )
+        else:
+            uncached.append((idx, url))
+
+    if uncached:
+        logger.info(
+            f"[{request_id}] Cache miss for {len(uncached)}/{len(image_urls)} URLs, "
+            "fetching from encode workers"
+        )
+        miss_urls = [url for _, url in uncached]
+        groups = await fetch_embeddings_via_stream(
+            encode_worker_client,
+            miss_urls,
+            request_id,
+        )
+        for (idx, url), group in zip(uncached, groups):
+            embedding = await load_embeddings(
+                group,
+                embeddings_dtype,
+                embeddings_device,
+                connector,
+            )
+            key = get_embedding_hash(url)
+            cache.set(
+                key,
+                CachedEmbedding(
+                    tensor=embedding,
+                    image_grid_thw=group.image_grid_thw,
+                ),
+            )
+            group.cached_embedding = embedding
+            results[idx] = group
+    else:
+        logger.info(f"[{request_id}] All {len(image_urls)} URLs served from cache")
+
+    return [r for r in results if r is not None]
