@@ -1426,6 +1426,7 @@ pub async fn create_worker_selection_pipeline_chat(
                 Some(prefill_config),
                 enforce_disagg,
                 model_name.to_string(),
+                namespace.to_string(),
             )
         });
 
