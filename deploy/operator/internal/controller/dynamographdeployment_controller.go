@@ -241,16 +241,16 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, err
 	}
 
-	// Override state based on rollout status if a rolling update is in progress
-	if dynamoDeployment.Status.Rollout != nil {
-		switch dynamoDeployment.Status.Rollout.Phase {
-		case v1alpha1.RolloutPhaseCompleted:
+	// Override state based on rolling update status if a rolling update is in progress
+	if dynamoDeployment.Status.RollingUpdate != nil {
+		switch dynamoDeployment.Status.RollingUpdate.Phase {
+		case v1alpha1.RollingUpdatePhaseCompleted:
 			// Keep the reconcileResult state (should be Ready if resources are ready)
-		case v1alpha1.RolloutPhaseFailed:
+		case v1alpha1.RollingUpdatePhaseFailed:
 			state = FailedState
 			reason = "rolling_update_failed"
 			message = "Rolling update failed"
-		case v1alpha1.RolloutPhasePending, v1alpha1.RolloutPhaseInProgress:
+		case v1alpha1.RollingUpdatePhasePending, v1alpha1.RollingUpdatePhaseInProgress:
 			// Rolling update in progress - resources are being transitioned
 			if state != FailedState {
 				state = PendingState
@@ -1028,19 +1028,19 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 
 	defaultIngressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
 
-	// Build rollout context if rolling update is in progress
-	var rolloutCtx *dynamo.RolloutContext
+	// Build rolling update context if rolling update is in progress
+	var rollingUpdateCtx *dynamo.RollingUpdateContext
 	if r.isRollingUpdateInProgress(dynamoDeployment) {
-		rolloutCtx = r.buildRolloutContext(ctx, dynamoDeployment)
+		rollingUpdateCtx = r.buildRollingUpdateContext(ctx, dynamoDeployment)
 		logger.Info("Rolling update in progress",
-			"oldWorkerHash", rolloutCtx.OldWorkerHash,
-			"newWorkerHash", rolloutCtx.NewWorkerHash,
-			"oldWorkerReplicas", rolloutCtx.OldWorkerReplicas)
+			"oldWorkerHash", rollingUpdateCtx.OldWorkerHash,
+			"newWorkerHash", rollingUpdateCtx.NewWorkerHash,
+			"oldWorkerReplicas", rollingUpdateCtx.OldWorkerReplicas)
 	}
 
 	// Generate all DCDs (handles both normal and rolling update cases)
 	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(
-		ctx, dynamoDeployment, &defaultIngressSpec, restartState, existingRestartAnnotations, rolloutCtx,
+		ctx, dynamoDeployment, &defaultIngressSpec, restartState, existingRestartAnnotations, rollingUpdateCtx,
 	)
 	if err != nil {
 		logger.Error(err, "failed to generate the DynamoComponentsDeployments")
@@ -1063,8 +1063,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	// During rolling update, scale old worker DCDs via direct patching.
 	// This is done separately from DCD generation to avoid overwriting the old spec
 	// with the new spec (which would trigger an unwanted rolling update on old workers).
-	if rolloutCtx != nil {
-		if err := r.scaleOldWorkerDCDs(ctx, dynamoDeployment, rolloutCtx); err != nil {
+	if rollingUpdateCtx != nil {
+		if err := r.scaleOldWorkerDCDs(ctx, dynamoDeployment, rollingUpdateCtx); err != nil {
 			logger.Error(err, "failed to scale old worker DCDs")
 			return ReconcileResult{}, fmt.Errorf("failed to scale old worker DCDs: %w", err)
 		}
@@ -1075,16 +1075,16 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	return result, nil
 }
 
-// buildRolloutContext creates a RolloutContext for the current rolling update.
+// buildRollingUpdateContext creates a RollingUpdateContext for the current rolling update.
 // It computes namespaces and pre-calculates old and new worker replica counts.
 //
-// The rollout heuristic is:
-// - newReplicas = min(desiredReplicas, newReadyReplicas + 1) - always one ahead to drive rollout
-// - oldReplicas = max(0, desiredReplicas - newReadyReplicas) - scale down as new becomes ready
-func (r *DynamoGraphDeploymentReconciler) buildRolloutContext(
+// The rollingUpdate heuristic is:
+// - newReplicas = min(desiredReplicas, newReadyReplicas + 1) - always one ahead to drive rolling update
+// - oldReplicas = max(0, desiredReplicas - newReadyReplicas) - scale down as new workers become ready
+func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-) *dynamo.RolloutContext {
+) *dynamo.RollingUpdateContext {
 	logger := log.FromContext(ctx)
 
 	// Compute hashes
@@ -1120,7 +1120,7 @@ func (r *DynamoGraphDeploymentReconciler) buildRolloutContext(
 			newReadyReplicas = *newDCD.Status.Service.ReadyReplicas
 		}
 
-		// Calculate new replicas: always one ahead to drive rollout forward
+		// Calculate new replicas: always one ahead to drive rolling update forward
 		// newReplicas = min(desiredReplicas, newReadyReplicas + 1)
 		newNeeded := newReadyReplicas + 1
 		if newNeeded > desiredReplicas {
@@ -1137,7 +1137,7 @@ func (r *DynamoGraphDeploymentReconciler) buildRolloutContext(
 		newWorkerReplicas[serviceName] = newNeeded
 		oldWorkerReplicas[serviceName] = oldNeeded
 
-		logger.V(1).Info("Calculated worker replicas for rollout",
+		logger.V(1).Info("Calculated worker replicas for rollingUpdate",
 			"service", serviceName,
 			"desired", desiredReplicas,
 			"newReady", newReadyReplicas,
@@ -1145,7 +1145,7 @@ func (r *DynamoGraphDeploymentReconciler) buildRolloutContext(
 			"oldNeeded", oldNeeded)
 	}
 
-	return &dynamo.RolloutContext{
+	return &dynamo.RollingUpdateContext{
 		InProgress:        true,
 		OldWorkerHash:     oldWorkerHash,
 		NewWorkerHash:     newWorkerHash,
