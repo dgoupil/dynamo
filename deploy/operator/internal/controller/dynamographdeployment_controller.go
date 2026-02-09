@@ -1033,8 +1033,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	if r.isRollingUpdateInProgress(dynamoDeployment) {
 		rolloutCtx = r.buildRolloutContext(ctx, dynamoDeployment)
 		logger.Info("Rolling update in progress",
-			"oldNamespace", rolloutCtx.OldDynamoNamespace,
-			"newNamespace", rolloutCtx.NewDynamoNamespace,
+			"oldWorkerHash", rolloutCtx.OldWorkerHash,
+			"newWorkerHash", rolloutCtx.NewWorkerHash,
 			"oldWorkerReplicas", rolloutCtx.OldWorkerReplicas)
 	}
 
@@ -1087,11 +1087,9 @@ func (r *DynamoGraphDeploymentReconciler) buildRolloutContext(
 ) *dynamo.RolloutContext {
 	logger := log.FromContext(ctx)
 
-	// Compute namespaces and hashes
+	// Compute hashes
 	newWorkerHashFull := dynamo.ComputeWorkerSpecHash(dgd)
-	newNamespace := dynamo.ComputeHashedDynamoNamespaceWithHash(dgd, newWorkerHashFull)
 	oldWorkerHashFull := r.getCurrentActiveWorkerHash(dgd)
-	oldNamespace := dynamo.ComputeHashedDynamoNamespaceWithHash(dgd, oldWorkerHashFull)
 
 	// Use first 8 chars of hash for DCD naming (short but unique enough)
 	newWorkerHash := newWorkerHashFull[:8]
@@ -1148,13 +1146,11 @@ func (r *DynamoGraphDeploymentReconciler) buildRolloutContext(
 	}
 
 	return &dynamo.RolloutContext{
-		InProgress:         true,
-		OldDynamoNamespace: oldNamespace,
-		NewDynamoNamespace: newNamespace,
-		OldWorkerHash:      oldWorkerHash,
-		NewWorkerHash:      newWorkerHash,
-		OldWorkerReplicas:  oldWorkerReplicas,
-		NewWorkerReplicas:  newWorkerReplicas,
+		InProgress:        true,
+		OldWorkerHash:     oldWorkerHash,
+		NewWorkerHash:     newWorkerHash,
+		OldWorkerReplicas: oldWorkerReplicas,
+		NewWorkerReplicas: newWorkerReplicas,
 	}
 }
 
