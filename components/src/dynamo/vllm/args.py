@@ -92,14 +92,12 @@ class Config:
     layerwise_num_gpu_layers: int = 1
     vae_use_slicing: bool = False
     vae_use_tiling: bool = False
-    boundary_ratio: Optional[float] = None
+    boundary_ratio: float = 0.875
     flow_shift: Optional[float] = None
     diffusion_cache_backend: Optional[str] = None
     diffusion_cache_config: Optional[str] = None
     enable_cache_dit_summary: bool = False
     enable_cpu_offload: bool = False
-    enforce_eager: bool = False
-
     # Diffusion parallel configuration
     ulysses_degree: int = 1
     ring_degree: int = 1
@@ -294,7 +292,7 @@ def parse_args() -> Config:
     parser.add_argument(
         "--video-output-dir",
         type=str,
-        default="/tmp/dynamo_videos",
+        default="/tmp/dynamo_videos",  # noqa: S108
         help="Directory to save generated video MP4 files (default: /tmp/dynamo_videos).",
     )
     parser.add_argument(
@@ -328,7 +326,7 @@ def parse_args() -> Config:
     parser.add_argument(
         "--boundary-ratio",
         type=float,
-        default=None,
+        default=0.875,
         help=(
             "Boundary split ratio for low/high DiT transformers. "
             "Default 0.875 uses both transformers for best quality. "
@@ -368,11 +366,6 @@ def parse_args() -> Config:
         "--enable-cpu-offload",
         action="store_true",
         help="Enable CPU offloading for diffusion models to reduce GPU memory usage.",
-    )
-    parser.add_argument(
-        "--enforce-eager",
-        action="store_true",
-        help="Disable torch.compile and force eager execution for diffusion models.",
     )
     parser.add_argument(
         "--ulysses-degree",
@@ -585,7 +578,6 @@ def parse_args() -> Config:
     config.diffusion_cache_config = args.diffusion_cache_config
     config.enable_cache_dit_summary = args.enable_cache_dit_summary
     config.enable_cpu_offload = args.enable_cpu_offload
-    config.enforce_eager = args.enforce_eager
     config.ulysses_degree = args.ulysses_degree
     config.ring_degree = args.ring_degree
     config.cfg_parallel_size = args.cfg_parallel_size
