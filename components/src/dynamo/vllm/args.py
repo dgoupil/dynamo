@@ -83,6 +83,27 @@ class Config:
     omni: bool = False
     # Path to vLLM-Omni stage configuration YAML
     stage_configs_path: Optional[str] = None
+    # Video diffusion output configuration
+    video_output_dir: str = "/tmp/dynamo_videos"  # noqa: S108
+    default_video_fps: int = 16
+
+    # Diffusion engine-level parameters (passed to AsyncOmni constructor)
+    enable_layerwise_offload: bool = False
+    layerwise_num_gpu_layers: int = 1
+    vae_use_slicing: bool = False
+    vae_use_tiling: bool = False
+    boundary_ratio: Optional[float] = None
+    flow_shift: Optional[float] = None
+    diffusion_cache_backend: Optional[str] = None
+    diffusion_cache_config: Optional[str] = None
+    enable_cache_dit_summary: bool = False
+    enable_cpu_offload: bool = False
+    enforce_eager: bool = False
+
+    # Diffusion parallel configuration
+    ulysses_degree: int = 1
+    ring_degree: int = 1
+    cfg_parallel_size: int = 1
 
     # dump config to file
     dump_config_to: Optional[str] = None
@@ -267,6 +288,111 @@ def parse_args() -> Config:
         default=None,
         help="Path to vLLM-Omni stage configuration YAML file for --omni mode (optional).",
     )
+
+    # (ayushag) TODO: Propose an alternate design to switch to AsyncOmniEngine args while using vLLM-Omni
+    # Video diffusion output args , Minimal set of configuration from text-to-video generation example.
+    parser.add_argument(
+        "--video-output-dir",
+        type=str,
+        default="/tmp/dynamo_videos",
+        help="Directory to save generated video MP4 files (default: /tmp/dynamo_videos).",
+    )
+    parser.add_argument(
+        "--default-video-fps",
+        type=int,
+        default=16,
+        help="Default frames per second for generated videos (default: 16).",
+    )
+    # Diffusion engine-level args (passed to AsyncOmni constructor)
+    parser.add_argument(
+        "--enable-layerwise-offload",
+        action="store_true",
+        help="Enable layerwise (blockwise) offloading on DiT modules to reduce GPU memory.",
+    )
+    parser.add_argument(
+        "--layerwise-num-gpu-layers",
+        type=int,
+        default=1,
+        help="Number of ready layers (blocks) to keep on GPU during generation (default: 1).",
+    )
+    parser.add_argument(
+        "--vae-use-slicing",
+        action="store_true",
+        help="Enable VAE slicing for memory optimization in diffusion models.",
+    )
+    parser.add_argument(
+        "--vae-use-tiling",
+        action="store_true",
+        help="Enable VAE tiling for memory optimization in diffusion models.",
+    )
+    parser.add_argument(
+        "--boundary-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Boundary split ratio for low/high DiT transformers. "
+            "Default 0.875 uses both transformers for best quality. "
+            "Set to 1.0 to load only the low-noise transformer (saves memory). "
+            "Only used with --omni."
+        ),
+    )
+    parser.add_argument(
+        "--flow-shift",
+        type=float,
+        default=None,
+        help="Scheduler flow_shift parameter (5.0 for 720p, 12.0 for 480p). Only used with --omni.",
+    )
+    parser.add_argument(
+        "--diffusion-cache-backend",
+        type=str,
+        default=None,
+        choices=["cache_dit", "tea_cache"],
+        help=(
+            "Cache backend for diffusion acceleration. "
+            "'cache_dit' enables DBCache + SCM + TaylorSeer. "
+            "'tea_cache' enables TeaCache. Only used with --omni."
+        ),
+    )
+    parser.add_argument(
+        "--diffusion-cache-config",
+        type=str,
+        default=None,
+        help="Cache configuration as JSON string (overrides defaults). Only used with --omni.",
+    )
+    parser.add_argument(
+        "--enable-cache-dit-summary",
+        action="store_true",
+        help="Enable cache-dit summary logging after diffusion forward passes.",
+    )
+    parser.add_argument(
+        "--enable-cpu-offload",
+        action="store_true",
+        help="Enable CPU offloading for diffusion models to reduce GPU memory usage.",
+    )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable torch.compile and force eager execution for diffusion models.",
+    )
+    parser.add_argument(
+        "--ulysses-degree",
+        type=int,
+        default=1,
+        help="Number of GPUs used for Ulysses sequence parallelism in diffusion (default: 1).",
+    )
+    parser.add_argument(
+        "--ring-degree",
+        type=int,
+        default=1,
+        help="Number of GPUs used for ring sequence parallelism in diffusion (default: 1).",
+    )
+    parser.add_argument(
+        "--cfg-parallel-size",
+        type=int,
+        default=1,
+        choices=[1, 2],
+        help="Number of GPUs used for classifier free guidance parallelism (default: 1).",
+    )
     parser.add_argument(
         "--store-kv",
         type=str,
@@ -393,7 +519,6 @@ def parse_args() -> Config:
             "--stage-configs-path is only allowed when using --omni. "
             "Specify a YAML file containing stage configurations for the multi-stage pipeline."
         )
-
     # Set component and endpoint based on worker type
     if args.multimodal_processor or args.ec_processor:
         config.component = "processor"
@@ -448,6 +573,22 @@ def parse_args() -> Config:
     config.ec_consumer_mode = args.ec_consumer_mode
     config.omni = args.omni
     config.stage_configs_path = args.stage_configs_path
+    config.video_output_dir = args.video_output_dir
+    config.default_video_fps = args.default_video_fps
+    config.enable_layerwise_offload = args.enable_layerwise_offload
+    config.layerwise_num_gpu_layers = args.layerwise_num_gpu_layers
+    config.vae_use_slicing = args.vae_use_slicing
+    config.vae_use_tiling = args.vae_use_tiling
+    config.boundary_ratio = args.boundary_ratio
+    config.flow_shift = args.flow_shift
+    config.diffusion_cache_backend = args.diffusion_cache_backend
+    config.diffusion_cache_config = args.diffusion_cache_config
+    config.enable_cache_dit_summary = args.enable_cache_dit_summary
+    config.enable_cpu_offload = args.enable_cpu_offload
+    config.enforce_eager = args.enforce_eager
+    config.ulysses_degree = args.ulysses_degree
+    config.ring_degree = args.ring_degree
+    config.cfg_parallel_size = args.cfg_parallel_size
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.event_plane = args.event_plane
