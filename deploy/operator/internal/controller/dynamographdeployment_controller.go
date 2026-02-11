@@ -669,7 +669,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 			if component.Ingress != nil {
 				ingressSpec = *component.Ingress
 			}
-			mainComponentIngress := dynamo.GenerateComponentIngress(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace, ingressSpec)
+			mainComponentIngress := dynamo.GenerateComponentIngress(ctx, dynamo.GetDCDResourceName(dynamoDeployment, componentName, ""), dynamoDeployment.Namespace, ingressSpec)
 			_, syncedMainComponentIngress, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
 				if !ingressSpec.Enabled || ingressSpec.IngressControllerClassName == nil {
 					logger.Info("Ingress is not enabled")
@@ -693,7 +693,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 			}
 			// generate the main component virtual service
 			if r.Config.IngressConfig.UseVirtualService() {
-				mainComponentVirtualService := dynamo.GenerateComponentVirtualService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace, ingressSpec)
+				mainComponentVirtualService := dynamo.GenerateComponentVirtualService(ctx, dynamo.GetDCDResourceName(dynamoDeployment, componentName, ""), dynamoDeployment.Namespace, ingressSpec)
 				_, syncedMainComponentVirtualService, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
 					if !ingressSpec.IsVirtualServiceEnabled() {
 						logger.Info("VirtualService is not enabled")
@@ -917,14 +917,7 @@ func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Conte
 
 // checkComponentServiceFullyUpdated checks if a DynamoComponentDeployment is fully updated.
 func (r *DynamoGraphDeploymentReconciler) checkComponentServiceFullyUpdated(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, serviceName string) (bool, string) {
-	var resourceName string
-	spec := dgd.Spec.Services[serviceName]
-	workerHash := r.getCurrentWorkerHash(dgd)
-	if spec != nil && dynamo.IsWorkerComponent(spec.ComponentType) && workerHash != "" {
-		resourceName = dynamo.GetDynamoComponentNameWithHashSuffix(dgd, serviceName, workerHash)
-	} else {
-		resourceName = dynamo.GetDynamoComponentName(dgd, serviceName)
-	}
+	resourceName := dynamo.GetDCDResourceName(dgd, serviceName, r.getCurrentWorkerHash(dgd))
 	return checkDCDReady(ctx, r.Client, resourceName, dgd.Namespace)
 }
 
@@ -1154,7 +1147,7 @@ func (r *DynamoGraphDeploymentReconciler) buildRollingUpdateContext(
 		}
 
 		// Query new DCD to get ready replicas (using hash-based naming)
-		newDCDName := dynamo.GetDynamoComponentNameWithHashSuffix(dgd, serviceName, newWorkerHash)
+		newDCDName := dynamo.GetDCDResourceName(dgd, serviceName, newWorkerHash)
 		newDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
 		err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD)
 
@@ -1200,13 +1193,8 @@ func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx c
 	logger := log.FromContext(ctx)
 
 	restartAnnotations := make(map[string]string)
-	for serviceName, spec := range dgd.Spec.Services {
-		var dcdName string
-		if spec != nil && dynamo.IsWorkerComponent(spec.ComponentType) && rollingUpdateCtx.NewWorkerHash != "" {
-			dcdName = dynamo.GetDynamoComponentNameWithHashSuffix(dgd, serviceName, rollingUpdateCtx.NewWorkerHash)
-		} else {
-			dcdName = dynamo.GetDynamoComponentName(dgd, serviceName)
-		}
+	for serviceName := range dgd.Spec.Services {
+		dcdName := dynamo.GetDCDResourceName(dgd, serviceName, rollingUpdateCtx.OldWorkerHash)
 		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
 		err := r.Get(ctx, types.NamespacedName{Name: dcdName, Namespace: dgd.Namespace}, existingDCD)
 
@@ -1645,7 +1633,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 	// 2. Reconcile InferencePool
 	// Note: EPP Service is created automatically by the standard component reconciliation
 	// via GenerateComponentService() in graph.go (see ComponentTypeEPP case)
-	eppServiceName := dynamo.GetDynamoComponentName(dgd, componentName)
+	eppServiceName := dynamo.GetDCDResourceName(dgd, componentName, "")
 	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, eppServiceName, eppService.EPPConfig)
 	if err != nil {
 		logger.Error(err, "Failed to generate EPP InferencePool")
