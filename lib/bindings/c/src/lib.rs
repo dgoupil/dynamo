@@ -1268,7 +1268,7 @@ fn spawn_prefill_watcher(
                         && let Ok(comp) = ns.component(&endpoint_id.component)
                     {
                         let endpoint = comp.endpoint(&endpoint_id.name);
-                        if let Err(e) = model_manager.activate_prefill_router(card.name(), endpoint)
+                        if let Err(e) = model_manager.activate_prefill_router(card.name(), namespace.to_string(), endpoint)
                         {
                             tracing::warn!(
                                 model_name = card.name(),
@@ -1382,7 +1382,7 @@ pub async fn create_worker_selection_pipeline_chat(
         metrics.clone(),
     );
     let cards = watcher
-        .cards_for_model(model_name, Some(namespace), false)
+        .cards_for_model(model_name, &NamespaceFilter::Exact(namespace.to_string()))
         .await
         .with_context(|| format!("Failed to discover model: {}", model_name))?;
 
