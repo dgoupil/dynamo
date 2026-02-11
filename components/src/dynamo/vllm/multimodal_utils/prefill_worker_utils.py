@@ -17,7 +17,6 @@ from .protocol import (
     MultiModalGroup,
     MultiModalInput,
     PatchedTokensPrompt,
-    VLLMNativeEncoderRequest,
     vLLMMultimodalRequest,
 )
 
@@ -184,62 +183,4 @@ async def fetch_embeddings_from_encode_workers(
             if output.multimodal_inputs:
                 multimodal_groups.extend(output.multimodal_inputs)
 
-    return multimodal_groups
-
-
-async def fetch_ec_connector_embeddings(
-    encode_worker_client: Client,
-    image_urls: List[str],
-    token_ids: List[int],
-    request_id: str,
-) -> List[MultiModalGroup]:
-    """Route to VLLMEncodeWorkerHandler (ECConnector producer).
-
-    Sends a VLLMNativeEncoderRequest to the encoder worker, which:
-    1. Executes vLLM encoder and stores embeddings to shared storage
-    2. Returns mm_hash for each image
-
-    The PD worker (as ECConnector consumer) will later load embeddings
-    by passing PIL images to vLLM, which looks them up via mm_hash.
-
-    Args:
-        encode_worker_client: Client for encode worker
-        image_urls: List of image URLs to encode
-        token_ids: Token IDs with placeholder tokens for images
-        request_id: Request ID for logging
-
-    Returns:
-        List of MultiModalGroups with image URLs (embeddings stored in ECConnector)
-    """
-    logger.info(
-        f"[{request_id}] Encoding {len(image_urls)} image(s) via "
-        f"vLLM-native encoder (ECConnector)..."
-    )
-
-    # Create multimodal groups for encoder
-    multimodal_groups = []
-    for url in image_urls:
-        multimodal_input = MultiModalInput()
-        multimodal_input.image_url = url
-        multimodal_groups.append(MultiModalGroup(multimodal_input=multimodal_input))
-
-    # Send to vLLM-native encoder using VLLMNativeEncoderRequest
-    encoder_request = VLLMNativeEncoderRequest(
-        request_id=request_id,
-        token_ids=token_ids,
-        multimodal_inputs=multimodal_groups,
-    )
-
-    request_json = encoder_request.model_dump_json()
-    response_stream = await encode_worker_client.round_robin(request_json)
-
-    # Consume encoder responses (embeddings written to ECConnector cache)
-    async for chunk in response_stream:
-        logger.debug(f"[{request_id}] Received encoder response (embeddings cached)")
-
-    logger.info(f"[{request_id}] Encoder completed successfully for all items")
-
-    # Return multimodal groups with image URLs intact
-    # In ECConnector consumer mode, PD worker passes PIL images to vLLM
-    # vLLM computes mm_hash and loads pre-computed embeddings from cache
     return multimodal_groups

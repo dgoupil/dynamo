@@ -36,7 +36,6 @@ def _make_config(
     is_prefill_worker: bool = False,
     enable_multimodal: bool = True,
     multimodal_embedding_cache_capacity_gb: float = 0,
-    ec_consumer_mode: bool = False,
 ) -> MagicMock:
     """Create a mock Config with the fields used by MultimodalPDWorkerHandler."""
     config = MagicMock()
@@ -46,10 +45,6 @@ def _make_config(
     config.multimodal_embedding_cache_capacity_gb = (
         multimodal_embedding_cache_capacity_gb
     )
-<<<<<<< HEAD
-=======
-    config.ec_consumer_mode = ec_consumer_mode
->>>>>>> c66729d1a (refactor: break down PreprocessedHandler)
     config.engine_args.create_model_config.return_value.get_diff_sampling_param.return_value = (
         {}
     )

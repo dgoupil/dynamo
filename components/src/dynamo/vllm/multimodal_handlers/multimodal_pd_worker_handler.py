@@ -31,7 +31,6 @@ from ..multimodal_utils.model import is_qwen_vl_model
 from ..multimodal_utils.prefill_worker_utils import (
     IMAGE_URL_KEY,
     accumulate_embeddings,
-    fetch_ec_connector_embeddings,
     fetch_embeddings_from_encode_workers,
     load_embeddings,
 )
@@ -130,22 +129,11 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         # Route to encode workers if available, otherwise build image-URL
         # groups so the downstream loop loads PIL images for inline encoding.
         if self.encode_worker_client and image_urls:
-            # Check if we're in ECConnector mode
-            if self._is_ec_connector_mode():
-                # ECConnector encoder: send VLLMNativeEncoderRequest
-                multimodal_groups = await fetch_ec_connector_embeddings(
-                    self.encode_worker_client,
-                    image_urls,
-                    raw_request["token_ids"],
-                    request_id,
-                )
-            else:
-                # Standalone encoder: use existing helper
-                multimodal_groups = await fetch_embeddings_from_encode_workers(
-                    self.encode_worker_client,
-                    image_urls,
-                    request_id,
-                )
+            multimodal_groups = await fetch_embeddings_from_encode_workers(
+                self.encode_worker_client,
+                image_urls,
+                request_id,
+            )
         else:
             # No encoder: inline encoding
             multimodal_groups = []
@@ -227,17 +215,6 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 )
 
         return multi_modal_data
-
-    # ── ECConnector encoder support ──────────────────────────────────
-
-    def _is_ec_connector_mode(self) -> bool:
-        """Check if using ECConnector encoder (vLLM-native) mode.
-
-        ECConnector mode is enabled when:
-        - encode_worker_client exists (encoder disaggregation)
-        - ec_consumer_mode is True (PD worker configured as consumer)
-        """
-        return self.encode_worker_client is not None and self.config.ec_consumer_mode
 
     # ── Request metadata finalization ────────────────────────────────
 

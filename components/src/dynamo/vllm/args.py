@@ -72,13 +72,6 @@ class Config:
     # Multimodal embedding cache capacity in GB (0 = disabled)
     multimodal_embedding_cache_capacity_gb: float = 0
 
-    # vLLM-native encoder worker (ECConnector mode)
-    vllm_native_encoder_worker: bool = False
-    ec_connector_backend: Optional[str] = "ECExampleConnector"
-    ec_storage_path: Optional[str] = None
-    ec_extra_config: Optional[str] = None
-    ec_consumer_mode: bool = False
-
     # vLLM-Omni worker for multi-stage pipelines
     omni: bool = False
     # Path to vLLM-Omni stage configuration YAML
@@ -230,34 +223,6 @@ def parse_args() -> Config:
         help="Capacity of the multimodal embedding cache in GB. Default: 0 (disabled)",
     )
     parser.add_argument(
-        "--vllm-native-encoder-worker",
-        action="store_true",
-        help="Run as vLLM-native encoder worker using ECConnector for encoder disaggregation (requires shared storage). The following flags only work when this flag is enabled: --ec-connector-backend, --ec-storage-path, --ec-extra-config, --ec-consumer-mode.",
-    )
-    parser.add_argument(
-        "--ec-connector-backend",
-        type=str,
-        default="ECExampleConnector",
-        help="ECConnector implementation class for encoder disaggregation. Default: ECExampleConnector (disk-based)",
-    )
-    parser.add_argument(
-        "--ec-storage-path",
-        type=str,
-        default=None,
-        help="Storage path for ECConnector (required for ECExampleConnector, optional for other backends)",
-    )
-    parser.add_argument(
-        "--ec-extra-config",
-        type=str,
-        default=None,
-        help="Additional ECConnector configuration as JSON string",
-    )
-    parser.add_argument(
-        "--dyn-ec-consumer-mode",
-        action="store_true",
-        help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers)",
-    )
-    parser.add_argument(
         "--omni",
         action="store_true",
         help="Run as vLLM-Omni worker for multi-stage pipelines (supports text-to-text, text-to-image, etc.)",
@@ -359,33 +324,21 @@ def parse_args() -> Config:
     config.namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
 
     # Check multimodal role exclusivity
-    # Note: --dyn-route-to-encoder and --dyn-ec-consumer-mode are modifier flags, not worker types
+    # Note: --dyn-route-to-encoder is a modifier flag, not a worker type
     mm_flags = (
         int(bool(args.multimodal_encode_worker))
         + int(bool(args.multimodal_worker))
         + int(bool(args.multimodal_decode_worker))
         + int(bool(args.multimodal_encode_prefill_worker))
-        + int(bool(args.vllm_native_encoder_worker))
     )
     if mm_flags > 1:
         raise ValueError(
             "Use only one of --multimodal-encode-worker, --multimodal-worker, "
-            "--multimodal-decode-worker, --multimodal-encode-prefill-worker, or --vllm-native-encoder-worker"
+            "--multimodal-decode-worker, or --multimodal-encode-prefill-worker"
         )
 
     if mm_flags == 1 and not args.enable_multimodal:
         raise ValueError("Use --enable-multimodal to enable multimodal processing")
-
-    # Validate vLLM-native encoder worker config
-    if args.vllm_native_encoder_worker:
-        if (
-            args.ec_connector_backend == "ECExampleConnector"
-            and not args.ec_storage_path
-        ):
-            raise ValueError(
-                "--ec-storage-path is required when using ECExampleConnector backend. "
-                "Specify a shared storage path for encoder cache."
-            )
 
     # Validate omni worker requirements
     if args.stage_configs_path and not args.omni:
@@ -398,11 +351,7 @@ def parse_args() -> Config:
     if args.dyn_route_to_encoder:
         config.component = "processor"
         config.endpoint = "generate"
-    elif (
-        args.vllm_native_encoder_worker
-        or args.multimodal_encode_worker
-        or args.multimodal_encode_prefill_worker
-    ):
+    elif args.multimodal_encode_worker or args.multimodal_encode_prefill_worker:
         config.component = "encoder"
         config.endpoint = "generate"
     elif args.multimodal_decode_worker:
@@ -444,11 +393,6 @@ def parse_args() -> Config:
     config.multimodal_embedding_cache_capacity_gb = (
         args.dyn_multimodal_embedding_cache_capacity_gb
     )
-    config.vllm_native_encoder_worker = args.vllm_native_encoder_worker
-    config.ec_connector_backend = args.ec_connector_backend
-    config.ec_storage_path = args.ec_storage_path
-    config.ec_extra_config = args.ec_extra_config
-    config.ec_consumer_mode = args.dyn_ec_consumer_mode
     config.omni = args.omni
     config.stage_configs_path = args.stage_configs_path
     config.store_kv = args.store_kv
