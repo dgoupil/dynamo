@@ -23,4 +23,11 @@ from dynamo.common.utils import (
     runtime,
 )
 
-__all__ = ["endpoint_types", "namespace", "otel_tracing", "paths", "prometheus", "runtime"]
+__all__ = [
+    "endpoint_types",
+    "namespace",
+    "otel_tracing",
+    "paths",
+    "prometheus",
+    "runtime",
+]
