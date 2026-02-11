@@ -1301,7 +1301,7 @@ async def init_omni(
     # TODO: extend for multi-stage pipelines
     await register_llm(
         ModelInput.Text,
-        ModelType.Images,
+        ModelType.Multimodal,
         generate_endpoint,
         config.model,
         config.served_model_name,

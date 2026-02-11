@@ -289,7 +289,7 @@ async def register_image_diffusion_model(
         readiness_gate: Optional event to signal when registration completes.
 
     Note:
-        Image diffusion models use ModelInput.Text (text prompts) and ModelType.Images.
+        Image diffusion models use ModelInput.Text (text prompts) and ModelType.Multimodal.
     """
     # Use model_path as the model name (diffusion workers don't have served_model_name)
     model_name = server_args.model_path
@@ -297,7 +297,7 @@ async def register_image_diffusion_model(
     try:
         await register_llm(
             ModelInput.Text,
-            ModelType.Images,
+            ModelType.Multimodal,
             endpoint,
             model_name,
             model_name,

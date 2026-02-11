@@ -116,7 +116,8 @@ impl ModelManager {
                 ModelType::Completions => self.completion_engines.read().checksum(model_name),
                 ModelType::Embedding => self.embeddings_engines.read().checksum(model_name),
                 ModelType::TensorBased => self.tensor_engines.read().checksum(model_name),
-                ModelType::Images => self.images_engines.read().checksum(model_name),
+                // (ayushag) TODO: Add video and audio endpoints to the multimodal model type.
+                ModelType::Multimodal => self.images_engines.read().checksum(model_name),
                 ModelType::Prefill => self.prefill_engines.read().checksum(model_name),
                 _ => {
                     continue;

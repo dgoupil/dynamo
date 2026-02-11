@@ -37,7 +37,7 @@ bitflags! {
         const Embedding = 1 << 2;
         const TensorBased = 1 << 3;
         const Prefill = 1 << 4;
-        const Images = 1 << 5;
+        const Multimodal = 1 << 5; // This will support all kinds of multimodal models, including images, videos, and audio.
     }
 }
 
@@ -61,8 +61,8 @@ impl ModelType {
     pub fn supports_prefill(&self) -> bool {
         self.contains(ModelType::Prefill)
     }
-    pub fn supports_images(&self) -> bool {
-        self.contains(ModelType::Images)
+    pub fn supports_multimodal(&self) -> bool {
+        self.contains(ModelType::Multimodal)
     }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
@@ -82,8 +82,8 @@ impl ModelType {
         if self.supports_prefill() {
             result.push("prefill");
         }
-        if self.supports_images() {
-            result.push("images");
+        if self.supports_multimodal() {
+            result.push("multimodal");
         }
         result
     }
@@ -107,8 +107,8 @@ impl ModelType {
         if self.supports_prefill() {
             result.push(ModelType::Prefill);
         }
-        if self.supports_images() {
-            result.push(ModelType::Images);
+        if self.supports_multimodal() {
+            result.push(ModelType::Multimodal);
         }
         result
     }
@@ -126,8 +126,9 @@ impl ModelType {
         if self.contains(Self::Embedding) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Embedding);
         }
-        // Images models support both chat and completions endpoints
-        if self.contains(Self::Images) {
+        // Multimodal models support both images and chat endpoints
+        // (ayushag) TODO: Add video and audio endpoints to the multimodal model type.
+        if self.contains(Self::Multimodal) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Images);
             endpoint_types.push(crate::endpoint_type::EndpointType::Chat);
         }

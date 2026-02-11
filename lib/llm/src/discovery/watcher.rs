@@ -71,7 +71,7 @@ const ALL_MODEL_TYPES: &[ModelType] = &[
     ModelType::Completions,
     ModelType::Embedding,
     ModelType::TensorBased,
-    ModelType::Images,
+    ModelType::Multimodal,
     ModelType::Prefill,
 ];
 
@@ -338,7 +338,7 @@ impl ModelWatcher {
                     || (completions_model_removed && *model_type == ModelType::Completions)
                     || (embeddings_model_removed && *model_type == ModelType::Embedding)
                     || (tensor_model_removed && *model_type == ModelType::TensorBased)
-                    || (images_model_removed && *model_type == ModelType::Images)
+                    || (images_model_removed && *model_type == ModelType::Multimodal)
                     || (prefill_model_removed && *model_type == ModelType::Prefill))
                     && let Some(tx) = &self.model_update_tx
                 {
@@ -649,9 +649,9 @@ impl ModelWatcher {
             let engine = Arc::new(push_router);
             self.manager
                 .add_tensor_model(card.name(), checksum, engine)?;
-        } else if card.model_input == ModelInput::Text && card.model_type.supports_images() {
+        } else if card.model_input == ModelInput::Text && card.model_type.supports_multimodal() {
             // Case: Text + Images (e.g. vLLM-Omni, diffusion models)
-            // Takes text prompts as input, generates images. Images models also support
+            // Takes text prompts as input, generates images, videos. Images models also support
             // chat completions (see model_type.rs as_endpoint_types).
             let images_router = PushRouter::<
                 NvCreateImageRequest,

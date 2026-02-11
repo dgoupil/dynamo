@@ -262,7 +262,7 @@ fn register_llm<'p>(
     };
 
     let is_tensor_based = model_type.inner.supports_tensor();
-    let is_images = model_type.inner.supports_images();
+    let is_images = model_type.inner.supports_multimodal();
 
     let model_type_obj = model_type.inner;
 
@@ -524,8 +524,8 @@ impl ModelType {
         inner: llm_rs::model_type::ModelType::Prefill,
     };
     #[classattr]
-    const Images: Self = ModelType {
-        inner: llm_rs::model_type::ModelType::Images,
+    const Multimodal: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Multimodal,
     };
 
     fn supports_chat(&self) -> bool {

@@ -941,13 +941,13 @@ class ModelInput:
     ...
 
 class ModelType:
-    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Images or Prefill"""
+    """What type of request this model needs: Chat, Completions, Embedding, Tensor, Multimodal or Prefill"""
     Chat: ModelType
     Completions: ModelType
     Embedding: ModelType
     TensorBased: ModelType
     Prefill: ModelType
-    Images: ModelType
+    Multimodal: ModelType
     ...
 
 class RouterMode:
