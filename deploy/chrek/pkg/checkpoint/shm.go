@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/sirupsen/logrus"
 )
@@ -72,8 +73,14 @@ func CaptureDevShm(pid int, checkpointDir string, log *logrus.Entry) error {
 
 		size := info.Size()
 
-		// Copy the file
-		if err := copyFile(srcPath, destPath, info.Mode()); err != nil {
+		uid, gid := -1, -1
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			uid = int(stat.Uid)
+			gid = int(stat.Gid)
+		}
+
+		// Copy the file and preserve ownership for restore-time /dev/shm replay.
+		if err := copyFile(srcPath, destPath, info.Mode(), uid, gid); err != nil {
 			log.WithError(err).WithField("file", name).Warn("Failed to copy file, skipping")
 			continue
 		}
@@ -98,8 +105,8 @@ func CaptureDevShm(pid int, checkpointDir string, log *logrus.Entry) error {
 	return nil
 }
 
-// copyFile copies a file from src to dest with the given permissions.
-func copyFile(src, dest string, mode os.FileMode) error {
+// copyFile copies a file from src to dest with the given permissions and ownership.
+func copyFile(src, dest string, mode os.FileMode, uid, gid int) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("failed to open source: %w", err)
@@ -114,6 +121,12 @@ func copyFile(src, dest string, mode os.FileMode) error {
 
 	if _, err := io.Copy(destFile, srcFile); err != nil {
 		return fmt.Errorf("failed to copy contents: %w", err)
+	}
+
+	if uid >= 0 && gid >= 0 {
+		if err := destFile.Chown(uid, gid); err != nil {
+			return fmt.Errorf("failed to set ownership to %d:%d: %w", uid, gid, err)
+		}
 	}
 
 	// Sync to ensure durability for checkpoint data

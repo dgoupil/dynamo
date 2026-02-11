@@ -52,6 +52,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
@@ -83,6 +84,7 @@ type DynamoComponentDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocomponentdeployments/finalizers,verbs=update
+// +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list;watch
 
 //+kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -1130,6 +1132,17 @@ func (r *DynamoComponentDeploymentReconciler) generateDeployment(ctx context.Con
 		}
 	}
 
+	// Checkpoint-restore pods must avoid overlap with prior replicas.
+	// Enforce Recreate whenever the rendered template is a restore target so
+	// the old pod is terminated before the restore placeholder is started.
+	if podTemplateSpec != nil &&
+		podTemplateSpec.Labels != nil &&
+		podTemplateSpec.Labels[commonconsts.KubeLabelCheckpointRestore] == commonconsts.KubeLabelValueTrue {
+		strategy = appsv1.DeploymentStrategy{
+			Type: appsv1.RecreateDeploymentStrategyType,
+		}
+	}
+
 	var replicas *int32
 	replicas = opt.dynamoComponentDeployment.Spec.Replicas
 	if opt.isStealingTrafficDebugModeEnabled {
@@ -1176,6 +1189,11 @@ type generateResourceOption struct {
 //nolint:gocyclo,nakedret
 func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption, role dynamo.Role) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
 	podLabels := r.getKubeLabels(opt.dynamoComponentDeployment)
+	// Restore labels are operator-controlled. Clear any stale values from prior
+	// reconciliation versions or user-provided metadata before applying the
+	// explicit ready-checkpoint contract below.
+	delete(podLabels, commonconsts.KubeLabelCheckpointRestore)
+	delete(podLabels, commonconsts.KubeLabelRestoreRequestID)
 	if opt.isStealingTrafficDebugModeEnabled {
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
 	}
@@ -1280,6 +1298,15 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if extraPodMetadata != nil {
 		maps.Copy(podAnnotations, extraPodMetadata.Annotations)
 		maps.Copy(podLabels, extraPodMetadata.Labels)
+	}
+
+	// Explicit restore orchestration contract:
+	// only mark pods as restore targets when checkpoint material is ready.
+	if checkpointInfo != nil && checkpointInfo.Enabled && checkpointInfo.Ready {
+		podLabels[commonconsts.KubeLabelCheckpointRestore] = commonconsts.KubeLabelValueTrue
+		if checkpointInfo.Hash != "" {
+			podLabels[commonconsts.KubeLabelRestoreRequestID] = checkpointInfo.Hash
+		}
 	}
 
 	// Propagate restart annotation to pod template to trigger rolling restart
@@ -1443,6 +1470,25 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 		Owns(&corev1.Service{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&networkingv1.Ingress{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Owns(&corev1.PersistentVolumeClaim{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Watches(
+			&v1alpha1.DynamoCheckpoint{},
+			handler.EnqueueRequestsFromMapFunc(r.mapCheckpointToComponentRequests),
+			builder.WithPredicates(predicate.Funcs{
+				CreateFunc: func(event.CreateEvent) bool { return true },
+				DeleteFunc: func(event.DeleteEvent) bool { return false },
+				UpdateFunc: func(ue event.UpdateEvent) bool {
+					oldCkpt, okOld := ue.ObjectOld.(*v1alpha1.DynamoCheckpoint)
+					newCkpt, okNew := ue.ObjectNew.(*v1alpha1.DynamoCheckpoint)
+					if !okOld || !okNew {
+						return false
+					}
+					// Reconcile components when checkpoint lifecycle or identity changes.
+					return oldCkpt.Status.Phase != newCkpt.Status.Phase ||
+						oldCkpt.Status.IdentityHash != newCkpt.Status.IdentityHash
+				},
+				GenericFunc: func(event.GenericEvent) bool { return false },
+			}),
+		).
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config))
 
 	if r.Config.LWS.Enabled {
@@ -1473,4 +1519,41 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 
 func (r *DynamoComponentDeploymentReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
+}
+
+// mapCheckpointToComponentRequests maps a DynamoCheckpoint update to all DCDs in the
+// same namespace sharing the checkpoint hash identity label.
+func (r *DynamoComponentDeploymentReconciler) mapCheckpointToComponentRequests(ctx context.Context, obj client.Object) []ctrl.Request {
+	ckpt, ok := obj.(*v1alpha1.DynamoCheckpoint)
+	if !ok {
+		return nil
+	}
+
+	hash := ckpt.Status.IdentityHash
+	if hash == "" {
+		hash = ckpt.GetLabels()[commonconsts.KubeLabelCheckpointHash]
+	}
+	if hash == "" {
+		return nil
+	}
+
+	var dcdList v1alpha1.DynamoComponentDeploymentList
+	if err := r.List(ctx, &dcdList,
+		client.InNamespace(ckpt.Namespace),
+		client.MatchingLabels{commonconsts.KubeLabelCheckpointHash: hash},
+	); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list DCDs for checkpoint", "checkpoint", ckpt.Name, "hash", hash)
+		return nil
+	}
+
+	reqs := make([]ctrl.Request, 0, len(dcdList.Items))
+	for i := range dcdList.Items {
+		reqs = append(reqs, ctrl.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      dcdList.Items[i].Name,
+				Namespace: dcdList.Items[i].Namespace,
+			},
+		})
+	}
+	return reqs
 }

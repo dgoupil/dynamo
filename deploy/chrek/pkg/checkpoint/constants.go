@@ -16,6 +16,20 @@ const (
 	// Set by the operator on checkpoint-eligible pods.
 	KubeLabelCheckpointHash = "nvidia.com/checkpoint-hash"
 
+	// KubeLabelCheckpointName is the checkpoint CR name linked to the checkpoint job pod.
+	KubeLabelCheckpointName = "nvidia.com/checkpoint-name"
+
+	// KubeLabelCheckpointRestore is the pod label that triggers automatic restore.
+	// Set by the operator on restore-eligible (placeholder) pods.
+	KubeLabelCheckpointRestore = "nvidia.com/checkpoint-restore"
+
+	// KubeLabelRestoreRequestID is the restore request identifier for explicit orchestration.
+	KubeLabelRestoreRequestID = "nvidia.com/restore-request-id"
+
+	// KubeLabelDynamoSelector is the DCD selector label placed on workload pods.
+	// This resolves the owning DynamoComponentDeployment for restore status updates.
+	KubeLabelDynamoSelector = "nvidia.com/selector"
+
 	// DumpLogFilename is the CRIU dump (checkpoint) log filename.
 	DumpLogFilename = "dump.log"
 

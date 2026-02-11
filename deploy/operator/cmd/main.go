@@ -248,7 +248,7 @@ func main() {
 		"checkpoint-ready-for-checkpoint-file-path", "/tmp/ready-for-checkpoint",
 		"Path written by the worker container when the model is loaded and ready for checkpointing")
 	flag.StringVar(&checkpointRestoreMarkerFilePath, "checkpoint-restore-marker-file-path", "/tmp/dynamo-restored",
-		"Path written by restore-entrypoint after successful CRIU restore")
+		"Path used by checkpoint-mode workers to detect successful restore")
 	opts := zap.Options{
 		Development: true,
 	}

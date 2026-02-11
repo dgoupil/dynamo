@@ -35,17 +35,12 @@ type MountPolicy struct {
 //  1. Skip non-OCI proc/sys submounts and non-OCI runtime /run submounts.
 //     These mounts are typically node/kernel/runtime specific and are the
 //     highest-risk source of cross-node restore failures, so skip wins.
-//  2. Externalize mounts owned by runtime/OCI:
-//     - "/" (rootfs is recreated by runtime in OCI restore path)
-//     - OCI mount destinations
-//     - OCI masked/readonly paths
-//  3. Externalize non-OCI bind-like mounts (mount root is not "/" or ".").
-//     This captures runtime-injected file mounts (for example driver files)
-//     so CRIU does not try to recreate them from checkpoint data.
-//  4. Anything else is left unflagged and handled by CRIU default behavior.
+//  2. Externalize everything else. All non-skipped mounts are marked as
+//     external so CRIU does not try to recreate them from checkpoint data.
+//     The restore environment (placeholder container) provides them.
 //
 // Precedence: skip > externalize. If a path is classified as skipped, it is
-// removed from the externalized set.
+// not added to the externalized set.
 func BuildMountPolicy(mountInfo []MountInfo, ociSpec *specs.Spec, rootFS string) *MountPolicy {
 	ociManagedSet := collectOCIManagedDestinations(ociSpec, rootFS)
 
@@ -88,14 +83,10 @@ func BuildMountPolicy(mountInfo []MountInfo, ociSpec *specs.Spec, rootFS string)
 
 		if !isOCIManaged && (strings.HasPrefix(mp, "/proc/") || strings.HasPrefix(mp, "/sys/") || isRunRuntimeMount) {
 			skippedSet[mp] = struct{}{}
-			delete(externalizedSet, mp)
 			continue
 		}
 
-		if mp == "/" || isOCIManaged || (root != "." && root != "/") {
-			externalizedSet[mp] = struct{}{}
-			continue
-		}
+		externalizedSet[mp] = struct{}{}
 	}
 
 	// Ensure OCI-managed destinations are externalized, even when mountinfo does not

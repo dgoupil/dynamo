@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	criu "github.com/checkpoint-restore/go-criu/v7"
-	criurpc "github.com/checkpoint-restore/go-criu/v7/rpc"
+	criu "github.com/checkpoint-restore/go-criu/v8"
+	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
@@ -64,7 +64,7 @@ type CRIUSettings struct {
 	// ExtMasters allows external bind mount masters.
 	ExtMasters bool `yaml:"extMasters"`
 
-	// ManageCgroupsMode controls cgroup handling: "ignore" lets K8s manage cgroups.
+	// ManageCgroupsMode controls cgroup handling: ignore/soft/full/strict.
 	ManageCgroupsMode string `yaml:"manageCgroupsMode"`
 
 	// === CRIU Conf File Options (NOT available via RPC - written to criu.conf) ===

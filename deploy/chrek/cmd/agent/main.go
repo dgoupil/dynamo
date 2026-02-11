@@ -1,7 +1,6 @@
-// Package main provides the CRIU node agent with HTTP API and/or pod watching.
-// The agent supports two modes that can be enabled independently:
-// - HTTP API mode: Exposes REST endpoints for checkpoint/restore operations
-// - Watcher mode: Automatically checkpoints pods with nvidia.com/checkpoint-source=true label
+// Package main provides the chrek DaemonSet agent.
+// The agent runs a UDS HTTP server for checkpoint/restore operations and
+// optionally watches pods for automatic checkpointing.
 package main
 
 import (
@@ -14,95 +13,91 @@ import (
 	"time"
 
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
-	httpApiServer "github.com/ai-dynamo/dynamo/deploy/chrek/pkg/http_api_server"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/externalrestore"
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/watcher"
 )
 
 func main() {
-	// Load configuration from ConfigMap (or use defaults if not found)
 	cfg, err := LoadConfigOrDefault(ConfigMapPath)
 	if err != nil {
 		log.Fatalf("Failed to load configuration: %v", err)
 	}
-
-	// Validate configuration
-	if err := cfg.Agent.Validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		log.Fatalf("Invalid configuration: %v", err)
 	}
 
-	// Create discovery client
 	discoveryClient, err := checkpoint.NewDiscoveryClient()
 	if err != nil {
 		log.Fatalf("Failed to create discovery client: %v", err)
 	}
 	defer discoveryClient.Close()
 
-	// Create checkpointer
 	checkpointer := checkpoint.NewCheckpointer(discoveryClient)
+
+	// Create the external restorer
+	restorer := externalrestore.NewRestorer(
+		externalrestore.RestorerConfig{
+			CheckpointBasePath: cfg.Checkpoint.BasePath,
+		},
+		discoveryClient,
+	)
+
+	// Create UDS server
+	serverCfg := externalrestore.ServerConfig{
+		SocketPath:     cfg.Agent.SocketPath,
+		NodeName:       cfg.Agent.NodeName,
+		CheckpointSpec: &cfg.Checkpoint,
+		CRIUTimeout:    cfg.Checkpoint.CRIU.Timeout,
+	}
+	srv := externalrestore.NewServer(serverCfg, checkpointer, restorer)
 
 	// Context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	log.Printf("CRIU Node Agent starting (node: %s)", cfg.Agent.NodeName)
+	log.Printf("Chrek agent starting (node: %s)", cfg.Agent.NodeName)
 	log.Printf("Checkpoint directory: %s", cfg.Checkpoint.BasePath)
-	log.Printf("Signal source: %s", cfg.Agent.SignalSource)
+	log.Printf("UDS socket: %s", cfg.Agent.SocketPath)
 
-	switch cfg.Agent.GetSignalSource() {
-	case SignalFromHTTP:
-		serverCfg := httpApiServer.ServerConfig{
-			ListenAddr:     cfg.Agent.ListenAddr,
-			NodeName:       cfg.Agent.NodeName,
-			CheckpointSpec: &cfg.Checkpoint,
-		}
-		srv := httpApiServer.NewServer(serverCfg, checkpointer)
-
-		// Handle graceful shutdown
-		go func() {
-			<-sigChan
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer shutdownCancel()
-			if err := srv.Shutdown(shutdownCtx); err != nil {
-				log.Printf("HTTP server shutdown error: %v", err)
-			}
-		}()
-
-		if err := srv.Start(); err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
-		}
-
-	case SignalFromWatcher:
-		watcherConfig := watcher.WatcherConfig{
+	// Start optional watcher alongside UDS server
+	if cfg.Agent.EnableWatcher {
+		watcherCfg := watcher.WatcherConfig{
 			NodeName:            cfg.Agent.NodeName,
 			ListenAddr:          cfg.Agent.ListenAddr,
 			RestrictedNamespace: cfg.Agent.RestrictedNamespace,
+			AgentSocketPath:     cfg.Agent.SocketPath,
 			CheckpointSpec:      &cfg.Checkpoint,
 		}
-
-		podWatcher, err := watcher.NewWatcher(watcherConfig, discoveryClient, checkpointer)
+		podWatcher, err := watcher.NewWatcher(watcherCfg, discoveryClient)
 		if err != nil {
 			log.Fatalf("Failed to create pod watcher: %v", err)
 		}
-
-		// Handle graceful shutdown
 		go func() {
-			<-sigChan
-			log.Println("Shutting down pod watcher...")
-			cancel()
+			log.Printf("Pod watcher started (watching for label: %s=true)", checkpoint.KubeLabelCheckpointSource)
+			if err := podWatcher.Start(ctx); err != nil {
+				log.Printf("Pod watcher error: %v", err)
+			}
 		}()
+	}
 
-		log.Printf("Pod watcher started (watching for label: %s=true)", checkpoint.KubeLabelCheckpointSource)
-		log.Printf("Health check endpoint: http://0.0.0.0%s/health", cfg.Agent.ListenAddr)
-		if err := podWatcher.Start(ctx); err != nil {
-			log.Printf("Pod watcher error: %v", err)
+	// Handle graceful shutdown
+	go func() {
+		<-sigChan
+		log.Println("Shutting down...")
+		cancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer shutdownCancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Server shutdown error: %v", err)
 		}
+	}()
 
-	default:
-		log.Fatalf("Unknown signal source: %s", cfg.Agent.SignalSource)
+	// Start UDS server (blocks until shutdown)
+	if err := srv.Start(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Server error: %v", err)
 	}
 
 	log.Println("Agent stopped")

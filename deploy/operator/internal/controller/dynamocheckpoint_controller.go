@@ -340,7 +340,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 				Name:  consts.EnvCheckpointStorageType,
 				Value: storageType,
 			},
-			// Restore marker: Written by restore-entrypoint after CRIU restore
+			// Restore marker: Checked by checkpoint-mode workers to detect successful restore
 			corev1.EnvVar{
 				Name:  consts.EnvRestoreMarkerFile,
 				Value: r.Config.Checkpoint.RestoreMarkerFilePath,

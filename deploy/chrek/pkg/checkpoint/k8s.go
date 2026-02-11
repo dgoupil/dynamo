@@ -77,3 +77,36 @@ func (c *DiscoveryClient) ResolveContainer(ctx context.Context, containerID stri
 
 	return int(pid), spec, nil
 }
+
+// ResolveContainerByPod finds a container by pod name, namespace, and container name
+// by listing containerd containers and matching CRI labels.
+func (c *DiscoveryClient) ResolveContainerByPod(ctx context.Context, podName, podNamespace, containerName string) (int, *specs.Spec, error) {
+	ctx = namespaces.WithNamespace(ctx, K8sNamespace)
+
+	// CRI sets these labels on containerd containers
+	filter := fmt.Sprintf("labels.\"io.kubernetes.pod.name\"==%s,labels.\"io.kubernetes.pod.namespace\"==%s,labels.\"io.kubernetes.container.name\"==%s",
+		podName, podNamespace, containerName)
+
+	containers, err := c.client.Containers(ctx, filter)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to list containers for pod %s/%s: %w", podNamespace, podName, err)
+	}
+
+	if len(containers) == 0 {
+		return 0, nil, fmt.Errorf("no container found for pod %s/%s container %s", podNamespace, podName, containerName)
+	}
+
+	// Use the first matching container (there should be exactly one)
+	container := containers[0]
+	task, err := container.Task(ctx, nil)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to get task for container in pod %s/%s: %w", podNamespace, podName, err)
+	}
+
+	spec, err := container.Spec(ctx)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to get spec for container in pod %s/%s: %w", podNamespace, podName, err)
+	}
+
+	return int(task.Pid()), spec, nil
+}

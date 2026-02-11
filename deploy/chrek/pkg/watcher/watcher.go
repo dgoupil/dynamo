@@ -13,14 +13,19 @@ import (
 
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/checkpoint"
+	"github.com/ai-dynamo/dynamo/deploy/chrek/pkg/externalrestore"
 )
 
 // SignalFile represents the content of a checkpoint completion signal file
@@ -37,28 +42,56 @@ type WatcherConfig struct {
 	NodeName            string
 	ListenAddr          string // HTTP server address for health checks (e.g., ":8080")
 	RestrictedNamespace string // Optional: restrict watching to this namespace (empty = cluster-wide)
+	AgentSocketPath     string // Pod-local UDS socket path exposed by the chrek API server.
 
 	// Checkpoint configuration (from ConfigMap)
 	CheckpointSpec *checkpoint.CheckpointSpec
 }
 
-// Watcher watches for pods with checkpoint labels and triggers checkpoints
+// Watcher watches for pods with checkpoint/restore labels and triggers operations
 type Watcher struct {
 	config          WatcherConfig
 	clientset       kubernetes.Interface
+	dynamicClient   dynamic.Interface
+	agentClient     *externalrestore.Client
 	discoveryClient *checkpoint.DiscoveryClient
-	checkpointer    *checkpoint.Checkpointer
 	log             *logrus.Entry
 
-	// Track pods checkpoint status: "in_progress", "completed", or "" (not started/failed)
+	// Track checkpoint status: "in_progress", "completed", or "" (not started/failed)
 	checkpointed   map[string]string
 	checkpointedMu sync.RWMutex
+
+	// Track restore status: "in_progress", "completed", or "" (not started/failed)
+	// Values:
+	// - "in_progress": restore request issued and still running
+	// - "completed": external restore succeeded
+	// - "failed": external restore failed (no automatic retry for this pod)
+	restored   map[string]string
+	restoredMu sync.RWMutex
 
 	stopCh chan struct{}
 }
 
-// NewWatcher creates a new pod watcher
-func NewWatcher(cfg WatcherConfig, discoveryClient *checkpoint.DiscoveryClient, checkpointer *checkpoint.Checkpointer) (*Watcher, error) {
+const (
+	checkpointConditionType = "CheckpointState"
+	restoreConditionType    = "CheckpointRestore"
+)
+
+var (
+	dynamoCheckpointGVR = schema.GroupVersionResource{
+		Group:    "nvidia.com",
+		Version:  "v1alpha1",
+		Resource: "dynamocheckpoints",
+	}
+	dynamoComponentDeploymentGVR = schema.GroupVersionResource{
+		Group:    "nvidia.com",
+		Version:  "v1alpha1",
+		Resource: "dynamocomponentdeployments",
+	}
+)
+
+// NewWatcher creates a new pod watcher.
+func NewWatcher(cfg WatcherConfig, discoveryClient *checkpoint.DiscoveryClient) (*Watcher, error) {
 	// Create in-cluster Kubernetes client
 	restConfig, err := rest.InClusterConfig()
 	if err != nil {
@@ -70,13 +103,24 @@ func NewWatcher(cfg WatcherConfig, discoveryClient *checkpoint.DiscoveryClient, 
 		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
 
+	dynamicClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dynamic kubernetes client: %w", err)
+	}
+
+	if cfg.AgentSocketPath == "" {
+		return nil, fmt.Errorf("agent socket path is required")
+	}
+
 	return &Watcher{
 		config:          cfg,
 		clientset:       clientset,
+		dynamicClient:   dynamicClient,
+		agentClient:     externalrestore.NewClient(cfg.AgentSocketPath),
 		discoveryClient: discoveryClient,
-		checkpointer:    checkpointer,
 		log:             logrus.WithField("component", "watcher"),
 		checkpointed:    make(map[string]string),
+		restored:        make(map[string]string),
 		stopCh:          make(chan struct{}),
 	}, nil
 }
@@ -88,8 +132,11 @@ func (w *Watcher) Start(ctx context.Context) error {
 	}
 
 	w.log.WithFields(logrus.Fields{
-		"node":  w.config.NodeName,
-		"label": checkpoint.KubeLabelCheckpointSource,
+		"node":            w.config.NodeName,
+		"checkpoint":      checkpoint.KubeLabelCheckpointSource,
+		"restore":         checkpoint.KubeLabelCheckpointRestore,
+		"restore_enabled": w.agentClient != nil,
+		"socket_path":     w.config.AgentSocketPath,
 	}).Info("Starting pod watcher")
 
 	// Start health check HTTP server if address is configured
@@ -102,54 +149,79 @@ func (w *Watcher) Start(ctx context.Context) error {
 		}()
 	}
 
-	// Create informer factory with label selector and optional namespace restriction
-	labelSelector := labels.SelectorFromSet(labels.Set{
-		checkpoint.KubeLabelCheckpointSource: "true",
-	}).String()
-
-	factoryOptions := []informers.SharedInformerOption{
-		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
-			opts.LabelSelector = labelSelector
-		}),
-	}
-
-	// If namespace is specified, restrict watching to that namespace
+	// Namespace restriction options shared across informer factories
+	var nsOptions []informers.SharedInformerOption
 	if w.config.RestrictedNamespace != "" {
 		w.log.WithField("namespace", w.config.RestrictedNamespace).Info("Restricting pod watching to namespace")
-		factoryOptions = append(factoryOptions, informers.WithNamespace(w.config.RestrictedNamespace))
+		nsOptions = append(nsOptions, informers.WithNamespace(w.config.RestrictedNamespace))
 	} else {
 		w.log.Info("Watching pods cluster-wide (all namespaces)")
 	}
 
-	factory := informers.NewSharedInformerFactoryWithOptions(
-		w.clientset,
-		30*time.Second,
-		factoryOptions...,
+	var syncFuncs []cache.InformerSynced
+
+	// --- Checkpoint informer: watches pods with checkpoint-source=true ---
+	checkpointSelector := labels.SelectorFromSet(labels.Set{
+		checkpoint.KubeLabelCheckpointSource: "true",
+	}).String()
+
+	ckptFactoryOpts := append([]informers.SharedInformerOption{
+		informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
+			opts.LabelSelector = checkpointSelector
+		}),
+	}, nsOptions...)
+
+	ckptFactory := informers.NewSharedInformerFactoryWithOptions(
+		w.clientset, 30*time.Second, ckptFactoryOpts...,
 	)
 
-	podInformer := factory.Core().V1().Pods().Informer()
-
-	// Add event handlers
-	podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	ckptInformer := ckptFactory.Core().V1().Pods().Informer()
+	ckptInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			pod := obj.(*corev1.Pod)
-			w.handlePodEvent(ctx, pod)
+			w.handleCheckpointPodEvent(ctx, obj.(*corev1.Pod))
 		},
-		UpdateFunc: func(oldObj, newObj interface{}) {
-			pod := newObj.(*corev1.Pod)
-			w.handlePodEvent(ctx, pod)
+		UpdateFunc: func(_, newObj interface{}) {
+			w.handleCheckpointPodEvent(ctx, newObj.(*corev1.Pod))
 		},
 	})
+	go ckptFactory.Start(w.stopCh)
+	syncFuncs = append(syncFuncs, ckptInformer.HasSynced)
 
-	// Start informer
-	go factory.Start(w.stopCh)
+	// --- Restore informer: watches pods with checkpoint-restore=true ---
+	if w.agentClient != nil {
+		restoreSelector := labels.SelectorFromSet(labels.Set{
+			checkpoint.KubeLabelCheckpointRestore: "true",
+		}).String()
 
-	// Wait for cache sync
-	if !cache.WaitForCacheSync(w.stopCh, podInformer.HasSynced) {
-		return fmt.Errorf("failed to sync informer cache")
+		restoreFactoryOpts := append([]informers.SharedInformerOption{
+			informers.WithTweakListOptions(func(opts *metav1.ListOptions) {
+				opts.LabelSelector = restoreSelector
+			}),
+		}, nsOptions...)
+
+		restoreFactory := informers.NewSharedInformerFactoryWithOptions(
+			w.clientset, 30*time.Second, restoreFactoryOpts...,
+		)
+
+		restoreInformer := restoreFactory.Core().V1().Pods().Informer()
+		restoreInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				w.handleRestorePodEvent(ctx, obj.(*corev1.Pod))
+			},
+			UpdateFunc: func(_, newObj interface{}) {
+				w.handleRestorePodEvent(ctx, newObj.(*corev1.Pod))
+			},
+		})
+		go restoreFactory.Start(w.stopCh)
+		syncFuncs = append(syncFuncs, restoreInformer.HasSynced)
 	}
 
-	w.log.Info("Pod watcher started and cache synced")
+	// Wait for all caches to sync
+	if !cache.WaitForCacheSync(w.stopCh, syncFuncs...) {
+		return fmt.Errorf("failed to sync informer caches")
+	}
+
+	w.log.Info("Pod watcher started and caches synced")
 
 	// Wait for context cancellation
 	<-ctx.Done()
@@ -202,8 +274,8 @@ func (w *Watcher) Stop() {
 	close(w.stopCh)
 }
 
-// handlePodEvent processes a pod event
-func (w *Watcher) handlePodEvent(ctx context.Context, pod *corev1.Pod) {
+// handleCheckpointPodEvent processes a checkpoint pod event
+func (w *Watcher) handleCheckpointPodEvent(ctx context.Context, pod *corev1.Pod) {
 	// Filter to pods on this node
 	if pod.Spec.NodeName != w.config.NodeName {
 		return
@@ -240,8 +312,15 @@ func (w *Watcher) handlePodEvent(ctx context.Context, pod *corev1.Pod) {
 		"pod":           podKey,
 		"checkpoint_id": checkpointID,
 	}).Info("Pod ready, triggering checkpoint")
+	w.emitPodEvent(ctx, pod, corev1.EventTypeNormal, "CheckpointRequested", fmt.Sprintf("Checkpoint requested: %s", checkpointID))
+	w.setCheckpointStatus(ctx, pod, metav1.ConditionFalse, "CheckpointRequested", fmt.Sprintf("Checkpoint requested on node %s", w.config.NodeName), "Creating")
 
 	go w.doCheckpoint(ctx, pod, checkpointID, podKey)
+}
+
+// isPodRunning checks if the pod phase is Running (containers started).
+func (w *Watcher) isPodRunning(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodRunning
 }
 
 // isPodReady checks if all containers in the pod are ready
@@ -259,12 +338,156 @@ func (w *Watcher) isPodReady(pod *corev1.Pod) bool {
 	return false
 }
 
+// handleRestorePodEvent processes a restore pod event.
+// Triggers external restore when the placeholder pod becomes Running.
+func (w *Watcher) handleRestorePodEvent(ctx context.Context, pod *corev1.Pod) {
+	// Filter to pods on this node
+	if pod.Spec.NodeName != w.config.NodeName {
+		return
+	}
+
+	podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+
+	// Snapshot current restore state for this pod.
+	w.restoredMu.RLock()
+	restoreState := w.restored[podKey]
+	w.restoredMu.RUnlock()
+
+	// Wait for pod to be Running.
+	if !w.isPodRunning(pod) {
+		return
+	}
+
+	// Restore should only run while the target pod is not ready.
+	// Once restored and serving, readiness should flip to true and re-triggers are skipped.
+	if w.isPodReady(pod) {
+		// Keep DCD condition consistent with observed end state.
+		switch restoreState {
+		case "completed":
+			w.setRestoreStatus(ctx, pod, metav1.ConditionTrue, "RestoreSucceeded", "Restore completed and pod is Ready")
+		case "failed":
+			w.setRestoreStatus(ctx, pod, metav1.ConditionFalse, "RestoreFailed", "External restore failed; pod became Ready via cold start")
+		}
+		return
+	}
+
+	// Get checkpoint hash from label
+	checkpointID, ok := pod.Labels[checkpoint.KubeLabelCheckpointHash]
+	if !ok || checkpointID == "" {
+		w.log.WithField("pod", podKey).Warn("Restore pod has no checkpoint-hash label")
+		return
+	}
+
+	// Verify checkpoint is ready on disk before attempting restore.
+	checkpointDir := filepath.Join(w.config.CheckpointSpec.BasePath, checkpointID)
+	doneMarker := filepath.Join(checkpointDir, checkpoint.CheckpointDoneFilename)
+	if _, err := os.Stat(doneMarker); os.IsNotExist(err) {
+		w.log.WithFields(logrus.Fields{
+			"pod":           podKey,
+			"checkpoint_id": checkpointID,
+			"marker":        doneMarker,
+		}).Debug("Checkpoint not ready on disk, skipping restore")
+		return
+	}
+
+	// Check if restore is already in progress or completed
+	w.restoredMu.Lock()
+	status := w.restored[podKey]
+	if status == "completed" || status == "in_progress" || status == "failed" {
+		w.restoredMu.Unlock()
+		return
+	}
+	w.restored[podKey] = "in_progress"
+	w.restoredMu.Unlock()
+
+	w.log.WithFields(logrus.Fields{
+		"pod":           podKey,
+		"checkpoint_id": checkpointID,
+	}).Info("Restore pod running, triggering external restore")
+	w.emitPodEvent(ctx, pod, corev1.EventTypeNormal, "RestoreRequested", fmt.Sprintf("Restore requested from checkpoint %s", checkpointID))
+	w.setRestoreStatus(ctx, pod, metav1.ConditionFalse, "RestoreRequested", "Restore requested by watcher")
+
+	go w.doRestore(ctx, pod, checkpointID, podKey)
+}
+
+// doRestore performs external restore by calling the local chrek UDS API.
+func (w *Watcher) doRestore(ctx context.Context, pod *corev1.Pod, checkpointID, podKey string) {
+	log := w.log.WithFields(logrus.Fields{
+		"pod":           podKey,
+		"checkpoint_id": checkpointID,
+	})
+
+	if w.agentClient == nil {
+		err := fmt.Errorf("agent UDS client is not configured")
+		log.WithError(err).Error("External restore failed")
+		w.emitPodEvent(ctx, pod, corev1.EventTypeWarning, "RestoreFailed", err.Error())
+		w.setRestoreStatus(ctx, pod, metav1.ConditionFalse, "RestoreFailed", err.Error())
+		w.restoredMu.Lock()
+		w.restored[podKey] = "failed"
+		w.restoredMu.Unlock()
+		return
+	}
+
+	// Determine the main container name
+	containerName := "main"
+	for _, c := range pod.Spec.Containers {
+		if c.Name == "main" {
+			break
+		}
+		// Fall back to first container if no "main" container
+		if len(pod.Spec.Containers) == 1 {
+			containerName = c.Name
+		}
+	}
+
+	req := externalrestore.RestoreAPIRequest{
+		CheckpointID:  checkpointID,
+		PodName:       pod.Name,
+		PodNamespace:  pod.Namespace,
+		ContainerName: containerName,
+		RequestID:     restoreRequestID(pod, checkpointID),
+	}
+
+	result, err := w.agentClient.Restore(ctx, req)
+	if err != nil {
+		log.WithError(err).Error("External restore failed")
+		w.emitPodEvent(ctx, pod, corev1.EventTypeWarning, "RestoreFailed", err.Error())
+		w.setRestoreStatus(ctx, pod, metav1.ConditionFalse, "RestoreFailed", err.Error())
+		w.restoredMu.Lock()
+		w.restored[podKey] = "failed"
+		w.restoredMu.Unlock()
+		return
+	}
+
+	log.WithFields(logrus.Fields{
+		"restored_pid":    result.RestoredPID,
+		"completed_steps": result.CompletedSteps,
+	}).Info("External restore completed successfully")
+	w.emitPodEvent(ctx, pod, corev1.EventTypeNormal, "RestoreSucceeded", fmt.Sprintf("Restore completed from checkpoint %s", checkpointID))
+	w.setRestoreStatus(ctx, pod, metav1.ConditionFalse, "RestoreCompleted", fmt.Sprintf("Restore completed with PID %d; waiting for pod readiness", result.RestoredPID))
+
+	w.restoredMu.Lock()
+	w.restored[podKey] = "completed"
+	w.restoredMu.Unlock()
+}
+
 // doCheckpoint performs the checkpoint and writes the signal file
 func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointID, podKey string) {
 	log := w.log.WithFields(logrus.Fields{
 		"pod":           podKey,
 		"checkpoint_id": checkpointID,
 	})
+
+	if w.agentClient == nil {
+		err := fmt.Errorf("agent UDS client is not configured")
+		log.WithError(err).Error("Checkpoint failed")
+		w.emitPodEvent(ctx, pod, corev1.EventTypeWarning, "CheckpointFailed", err.Error())
+		w.setCheckpointStatus(ctx, pod, metav1.ConditionFalse, "CheckpointFailed", err.Error(), "Failed")
+		w.checkpointedMu.Lock()
+		delete(w.checkpointed, podKey)
+		w.checkpointedMu.Unlock()
+		return
+	}
 
 	// Find the main container and get signal file path from env
 	var containerID string
@@ -298,6 +521,8 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 
 	if containerID == "" {
 		log.Error("Could not find container ID")
+		w.emitPodEvent(ctx, pod, corev1.EventTypeWarning, "CheckpointFailed", "Could not resolve target container ID")
+		w.setCheckpointStatus(ctx, pod, metav1.ConditionFalse, "CheckpointFailed", "Could not resolve target container ID", "Failed")
 		w.checkpointedMu.Lock()
 		delete(w.checkpointed, podKey)
 		w.checkpointedMu.Unlock()
@@ -317,6 +542,8 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 	containerPID, _, err := w.discoveryClient.ResolveContainer(ctx, containerID)
 	if err != nil {
 		log.WithError(err).Error("Failed to resolve container")
+		w.emitPodEvent(ctx, pod, corev1.EventTypeWarning, "CheckpointFailed", fmt.Sprintf("Container resolve failed: %v", err))
+		w.setCheckpointStatus(ctx, pod, metav1.ConditionFalse, "CheckpointFailed", fmt.Sprintf("Container resolve failed: %v", err), "Failed")
 		w.checkpointedMu.Lock()
 		delete(w.checkpointed, podKey)
 		w.checkpointedMu.Unlock()
@@ -326,26 +553,29 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 	// Validate CheckpointSpec is set
 	if w.config.CheckpointSpec == nil {
 		log.Error("CheckpointSpec is nil - cannot perform checkpoint")
+		w.emitPodEvent(ctx, pod, corev1.EventTypeWarning, "CheckpointFailed", "CheckpointSpec is nil")
+		w.setCheckpointStatus(ctx, pod, metav1.ConditionFalse, "CheckpointFailed", "CheckpointSpec is nil", "Failed")
 		w.checkpointedMu.Lock()
 		delete(w.checkpointed, podKey)
 		w.checkpointedMu.Unlock()
 		return
 	}
 
-	// Perform checkpoint
-	params := checkpoint.CheckpointRequest{
+	// Perform checkpoint via local chrek UDS API.
+	req := externalrestore.CheckpointAPIRequest{
 		ContainerID:   containerID,
 		ContainerName: containerName,
 		CheckpointID:  checkpointID,
-		CheckpointDir: w.config.CheckpointSpec.BasePath,
-		NodeName:      w.config.NodeName,
 		PodName:       pod.Name,
 		PodNamespace:  pod.Namespace,
+		RequestID:     fmt.Sprintf("%s/%s:%s", pod.Namespace, pod.Name, checkpointID),
 	}
 
-	result, err := w.checkpointer.Checkpoint(ctx, params, w.config.CheckpointSpec)
+	result, err := w.agentClient.Checkpoint(ctx, req)
 	if err != nil {
 		log.WithError(err).Error("Checkpoint failed")
+		w.emitPodEvent(ctx, pod, corev1.EventTypeWarning, "CheckpointFailed", err.Error())
+		w.setCheckpointStatus(ctx, pod, metav1.ConditionFalse, "CheckpointFailed", err.Error(), "Failed")
 		// Write failure marker to PVC so restore pods know checkpoint failed
 		checkpointDir := filepath.Join(w.config.CheckpointSpec.BasePath, checkpointID)
 		w.writeCheckpointDoneMarker(checkpointDir, checkpointID, false, err.Error(), log)
@@ -359,14 +589,22 @@ func (w *Watcher) doCheckpoint(ctx context.Context, pod *corev1.Pod, checkpointI
 		return
 	}
 
-	log.WithField("checkpoint_dir", result.CheckpointDir).Info("Checkpoint completed successfully")
+	checkpointPath := filepath.Join(w.config.CheckpointSpec.BasePath, checkpointID)
+	if result != nil && result.CheckpointID != "" {
+		checkpointID = result.CheckpointID
+		checkpointPath = filepath.Join(w.config.CheckpointSpec.BasePath, result.CheckpointID)
+	}
+
+	log.WithField("checkpoint_dir", checkpointPath).Info("Checkpoint completed successfully")
+	w.emitPodEvent(ctx, pod, corev1.EventTypeNormal, "CheckpointSucceeded", fmt.Sprintf("Checkpoint completed: %s", checkpointID))
+	w.setCheckpointStatus(ctx, pod, metav1.ConditionTrue, "CheckpointSucceeded", fmt.Sprintf("Checkpoint completed at %s", checkpointPath), "Ready")
 
 	// Write checkpoint.done marker to PVC for cross-node restore detection
-	w.writeCheckpointDoneMarker(result.CheckpointDir, checkpointID, true, "", log)
+	w.writeCheckpointDoneMarker(checkpointPath, checkpointID, true, "", log)
 
 	// Write signal file to pod's hostPath for checkpoint job pod to exit
 	if signalFilePath != "" {
-		w.writeSignalFileToPod(containerPID, signalFilePath, checkpointID, result.CheckpointDir, true, "")
+		w.writeSignalFileToPod(containerPID, signalFilePath, checkpointID, checkpointPath, true, "")
 	}
 
 	// Mark as completed so we don't checkpoint again
@@ -442,4 +680,197 @@ func (w *Watcher) writeCheckpointDoneMarker(checkpointDir, checkpointID string, 
 		"path":    markerPath,
 		"success": success,
 	}).Info("checkpoint.done marker written to PVC")
+}
+
+func (w *Watcher) emitPodEvent(ctx context.Context, pod *corev1.Pod, eventType, reason, message string) {
+	event := &corev1.Event{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: fmt.Sprintf("%s-", pod.Name),
+			Namespace:    pod.Namespace,
+		},
+		InvolvedObject: corev1.ObjectReference{
+			Kind:       "Pod",
+			Namespace:  pod.Namespace,
+			Name:       pod.Name,
+			UID:        pod.UID,
+			APIVersion: "v1",
+		},
+		Type:    eventType,
+		Reason:  reason,
+		Message: message,
+		Source: corev1.EventSource{
+			Component: "chrek-watcher",
+		},
+		Count:          1,
+		FirstTimestamp: metav1.Now(),
+		LastTimestamp:  metav1.Now(),
+	}
+
+	if _, err := w.clientset.CoreV1().Events(pod.Namespace).Create(ctx, event, metav1.CreateOptions{}); err != nil {
+		w.log.WithError(err).WithFields(logrus.Fields{
+			"pod":     fmt.Sprintf("%s/%s", pod.Namespace, pod.Name),
+			"reason":  reason,
+			"message": message,
+		}).Warn("Failed to create watcher event")
+	}
+}
+
+func (w *Watcher) setCheckpointStatus(
+	ctx context.Context,
+	pod *corev1.Pod,
+	conditionStatus metav1.ConditionStatus,
+	reason string,
+	message string,
+	phase string,
+) {
+	checkpointName := pod.Labels[checkpoint.KubeLabelCheckpointName]
+	if checkpointName == "" {
+		w.log.WithField("pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)).Warn("Checkpoint pod missing checkpoint-name label")
+		return
+	}
+
+	condition := map[string]interface{}{
+		"type":               checkpointConditionType,
+		"status":             string(conditionStatus),
+		"reason":             reason,
+		"message":            message,
+		"lastTransitionTime": metav1.Now().Format(time.RFC3339),
+	}
+
+	err := w.updateStatusCondition(
+		ctx,
+		dynamoCheckpointGVR,
+		pod.Namespace,
+		checkpointName,
+		condition,
+		func(obj map[string]interface{}) error {
+			if phase != "" {
+				if err := unstructured.SetNestedField(obj, phase, "status", "phase"); err != nil {
+					return err
+				}
+			}
+			if message != "" {
+				if err := unstructured.SetNestedField(obj, message, "status", "message"); err != nil {
+					return err
+				}
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		w.log.WithError(err).WithFields(logrus.Fields{
+			"checkpoint": checkpointName,
+			"namespace":  pod.Namespace,
+			"reason":     reason,
+		}).Warn("Failed to update DynamoCheckpoint status")
+	}
+}
+
+func (w *Watcher) setRestoreStatus(
+	ctx context.Context,
+	pod *corev1.Pod,
+	conditionStatus metav1.ConditionStatus,
+	reason string,
+	message string,
+) {
+	dcdName := pod.Labels[checkpoint.KubeLabelDynamoSelector]
+	if dcdName == "" {
+		w.log.WithField("pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)).Warn("Restore pod missing DCD selector label")
+		return
+	}
+
+	condition := map[string]interface{}{
+		"type":               restoreConditionType,
+		"status":             string(conditionStatus),
+		"reason":             reason,
+		"message":            message,
+		"lastTransitionTime": metav1.Now().Format(time.RFC3339),
+	}
+
+	err := w.updateStatusCondition(
+		ctx,
+		dynamoComponentDeploymentGVR,
+		pod.Namespace,
+		dcdName,
+		condition,
+		nil,
+	)
+	if err != nil {
+		w.log.WithError(err).WithFields(logrus.Fields{
+			"dcd":       dcdName,
+			"namespace": pod.Namespace,
+			"reason":    reason,
+		}).Warn("Failed to update DynamoComponentDeployment restore condition")
+	}
+}
+
+func (w *Watcher) updateStatusCondition(
+	ctx context.Context,
+	gvr schema.GroupVersionResource,
+	namespace string,
+	name string,
+	condition map[string]interface{},
+	mutate func(obj map[string]interface{}) error,
+) error {
+	var lastErr error
+
+	for attempt := 0; attempt < 3; attempt++ {
+		obj, err := w.dynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		conditions, _, err := unstructured.NestedSlice(obj.Object, "status", "conditions")
+		if err != nil {
+			return fmt.Errorf("failed to read status.conditions: %w", err)
+		}
+		conditions = upsertCondition(conditions, condition)
+		if err := unstructured.SetNestedSlice(obj.Object, conditions, "status", "conditions"); err != nil {
+			return fmt.Errorf("failed to set status.conditions: %w", err)
+		}
+
+		if mutate != nil {
+			if err := mutate(obj.Object); err != nil {
+				return fmt.Errorf("failed to mutate status object: %w", err)
+			}
+		}
+
+		if _, err := w.dynamicClient.Resource(gvr).Namespace(namespace).UpdateStatus(ctx, obj, metav1.UpdateOptions{}); err != nil {
+			if apierrors.IsConflict(err) {
+				lastErr = err
+				continue
+			}
+			return err
+		}
+
+		return nil
+	}
+
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("status update failed after retries")
+}
+
+func restoreRequestID(pod *corev1.Pod, checkpointID string) string {
+	if id := pod.Labels[checkpoint.KubeLabelRestoreRequestID]; id != "" {
+		return id
+	}
+	return fmt.Sprintf("%s/%s:%s", pod.Namespace, pod.Name, checkpointID)
+}
+
+func upsertCondition(conditions []interface{}, condition map[string]interface{}) []interface{} {
+	condType, _ := condition["type"].(string)
+	for i, existing := range conditions {
+		typed, ok := existing.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if existingType, _ := typed["type"].(string); existingType == condType {
+			conditions[i] = condition
+			return conditions
+		}
+	}
+
+	return append(conditions, condition)
 }

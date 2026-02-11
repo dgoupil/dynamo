@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	criurpc "github.com/checkpoint-restore/go-criu/v7/rpc"
+	criurpc "github.com/checkpoint-restore/go-criu/v8/rpc"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/proto"
@@ -31,10 +31,11 @@ type CheckpointManifest struct {
 	CheckpointID string    `yaml:"checkpointId"`
 	CreatedAt    time.Time `yaml:"createdAt"`
 
-	CRIUDump   CRIUDumpManifest         `yaml:"criuDump"`
-	K8s        SourcePodManifest        `yaml:"k8s"`
-	Filesystem FilesystemManifest       `yaml:"filesystem"`
-	Namespaces []NamespaceManifestEntry `yaml:"namespaces"`
+	CRIUDump        CRIUDumpManifest         `yaml:"criuDump"`
+	K8s             SourcePodManifest        `yaml:"k8s"`
+	Filesystem      FilesystemManifest       `yaml:"filesystem"`
+	Namespaces      []NamespaceManifestEntry `yaml:"namespaces"`
+	ExternalRestore *ExternalRestoreConfig   `yaml:"externalRestore,omitempty"`
 }
 
 // NewCheckpointManifest assembles a CheckpointManifest from per-module builders.
@@ -116,10 +117,11 @@ func (c *Checkpointer) Checkpoint(ctx context.Context, req CheckpointRequest, sp
 	}
 
 	// Phase 2: Configure CRIU options and build checkpoint manifest.
-	criuOpts, data, err := c.configure(state, req, spec, checkpointDir, imageDirFD)
+	criuOpts, data, err := c.configure(ctx, state, req, spec, checkpointDir, imageDirFD)
 	if err != nil {
 		return nil, err
 	}
+	defer unlockExternalCUDA(data, c.log)
 
 	// Phase 3: Capture — CRIU dump, /dev/shm, rootfs diff
 	criuDumpDuration, err := c.capture(criuOpts, data, state, checkpointDir)
@@ -176,6 +178,7 @@ func (c *Checkpointer) introspect(ctx context.Context, containerID string) (*Con
 
 // configure builds CRIU options and checkpoint manifest from runtime snapshot and spec.
 func (c *Checkpointer) configure(
+	ctx context.Context,
 	state *ContainerInfoSnapshot,
 	req CheckpointRequest,
 	spec *CheckpointSpec,
@@ -211,7 +214,12 @@ func (c *Checkpointer) configure(
 		NewNamespaceManifestEntries(state.Namespaces),
 	)
 
+	if err := prepareExternalCUDA(ctx, req, state.PID, manifest, c.log); err != nil {
+		return nil, nil, fmt.Errorf("failed to prepare external CUDA checkpoint metadata: %w", err)
+	}
+
 	if err := WriteCheckpointManifest(checkpointDir, manifest); err != nil {
+		unlockExternalCUDA(manifest, c.log)
 		return nil, nil, fmt.Errorf("failed to write checkpoint manifest: %w", err)
 	}
 
