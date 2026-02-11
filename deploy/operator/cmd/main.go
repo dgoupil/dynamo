@@ -169,8 +169,6 @@ func main() {
 	var checkpointOCIURI string
 	var checkpointOCICredentialsSecret string
 	var checkpointInitContainerImage string
-	var trafficProxyImage string
-	var trafficProxyReplicas int
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -249,10 +247,6 @@ func main() {
 		"Docker config secret name for OCI registry auth (used when storage-type=oci)")
 	flag.StringVar(&checkpointInitContainerImage, "checkpoint-init-container-image", "busybox:latest",
 		"Image to use for checkpoint init containers (e.g., signal file cleanup)")
-	flag.StringVar(&trafficProxyImage, "traffic-proxy-image", "",
-		"HAProxy image for traffic proxy used in rolling updates (e.g., haproxy:2.9-alpine)")
-	flag.IntVar(&trafficProxyReplicas, "traffic-proxy-replicas", 2,
-		"Number of traffic proxy replicas for rolling updates")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -350,10 +344,6 @@ func main() {
 					CredentialsSecretRef: checkpointOCICredentialsSecret,
 				},
 			},
-		},
-		TrafficProxy: commonController.TrafficProxyConfig{
-			Image:    trafficProxyImage,
-			Replicas: int32(trafficProxyReplicas),
 		},
 	}
 
