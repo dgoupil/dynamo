@@ -395,6 +395,7 @@ use anyhow::Context;
 use dynamo_runtime::{Runtime, traits::DistributedRuntimeProvider};
 
 use dynamo_llm::discovery::ModelManager;
+use dynamo_llm::namespace::NamespaceFilter;
 use dynamo_llm::entrypoint::build_routed_pipeline;
 use dynamo_llm::http::service::metrics::Metrics;
 use dynamo_llm::kv_router::KvRouterConfig;
@@ -1268,7 +1269,7 @@ fn spawn_prefill_watcher(
                         && let Ok(comp) = ns.component(&endpoint_id.component)
                     {
                         let endpoint = comp.endpoint(&endpoint_id.name);
-                        if let Err(e) = model_manager.activate_prefill_router(card.name(), namespace.to_string(), endpoint)
+                        if let Err(e) = model_manager.activate_prefill_router(card.name(), namespace, endpoint)
                         {
                             tracing::warn!(
                                 model_name = card.name(),
