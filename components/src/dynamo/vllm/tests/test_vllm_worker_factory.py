@@ -7,18 +7,21 @@ import asyncio
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from vllm.config import ECTransferConfig
 
 from dynamo.vllm.args import Config
 from dynamo.vllm.worker_factory import EngineSetupResult, WorkerFactory
 
+pytestmark = [
+    pytest.mark.unit,
+    pytest.mark.vllm,
+    pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
+]
+
 
 class TestHandles:
     """Test WorkerFactory.handles() config detection."""
-
-    def test_vllm_native_encoder_worker(self) -> None:
-        config = Config()
-        config.vllm_native_encoder_worker = True
-        assert WorkerFactory.handles(config)
 
     def test_multimodal_encode_worker(self) -> None:
         config = Config()
@@ -65,20 +68,9 @@ class TestCreate:
             setup_kv_event_publisher_fn=Mock(),
             register_vllm_model_fn=AsyncMock(),
         )
-        factory._create_vllm_native_encoder_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_multimodal_encode_worker = AsyncMock()  # type: ignore[assignment]
         factory._create_multimodal_worker = AsyncMock()  # type: ignore[assignment]
         return factory
-
-    @pytest.mark.asyncio
-    async def test_routes_to_vllm_native_encoder(self, factory: WorkerFactory) -> None:
-        config = Config()
-        config.vllm_native_encoder_worker = True
-        shutdown_event = asyncio.Event()
-
-        await factory.create(Mock(), config, shutdown_event)
-
-        factory._create_vllm_native_encoder_worker.assert_called_once()  # type: ignore[union-attr]
 
     @pytest.mark.asyncio
     async def test_routes_to_multimodal_encode(self, factory: WorkerFactory) -> None:
@@ -150,3 +142,55 @@ class TestCreate:
         config = Config()
         with pytest.raises(ValueError, match="no multimodal worker type set"):
             await factory.create(Mock(), config, asyncio.Event())
+
+
+class TestEcTransferConfig:
+    """Test that ec_transfer_config is set correctly for embedding cache."""
+
+    @pytest.mark.asyncio
+    async def test_ec_transfer_config_set_when_cache_enabled(self) -> None:
+        """When multimodal_embedding_cache_capacity_gb > 0 and no encode worker,
+        _create_multimodal_worker should set ec_transfer_config on engine_args
+        BEFORE calling setup_vllm_engine so that vLLM sees the config."""
+        config = Config()
+        config.namespace = "dynamo"
+        config.component = "backend"
+        config.endpoint = "generate"
+        config.multimodal_worker = True
+        config.multimodal_embedding_cache_capacity_gb = 4.0
+        config.route_to_encoder = False
+        config.engine_args = Mock()
+        config.engine_args.ec_transfer_config = None
+
+        # setup_vllm_engine captures the ec_transfer_config at the moment it's called
+        # to verify it was set BEFORE engine creation
+        captured_ec_config = {}
+
+        def fake_setup_vllm_engine(cfg):
+            captured_ec_config["value"] = cfg.engine_args.ec_transfer_config
+            return (Mock(), Mock(), Mock(), None, Mock())
+
+        factory = WorkerFactory(
+            setup_vllm_engine_fn=fake_setup_vllm_engine,
+            setup_kv_event_publisher_fn=Mock(return_value=None),
+            register_vllm_model_fn=AsyncMock(),
+        )
+
+        # Call _create_multimodal_worker directly — it will call setup_vllm_engine
+        # which captures the ec_transfer_config, then fail later on endpoint setup
+        with pytest.raises(Exception):
+            await factory._create_multimodal_worker(Mock(), config, asyncio.Event())
+
+        ec_cfg = captured_ec_config.get("value")
+        assert isinstance(
+            ec_cfg, ECTransferConfig
+        ), f"setup_vllm_engine should see ECTransferConfig, got {ec_cfg!r}. "
+        assert ec_cfg.ec_role == "ec_both"
+        assert ec_cfg.ec_connector == "DynamoMultimodalEmbeddingCacheConnector"
+        assert ec_cfg.ec_connector_module_path == (
+            "dynamo.vllm.multimodal_utils.multimodal_embedding_cache_connector"
+        )
+        assert (
+            ec_cfg.ec_connector_extra_config["multimodal_embedding_cache_capacity_gb"]
+            == 4.0
+        )

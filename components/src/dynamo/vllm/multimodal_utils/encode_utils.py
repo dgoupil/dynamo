@@ -19,6 +19,7 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
+from vllm.config import ECTransferConfig
 
 from .model import SupportedModels, is_model_supported, is_qwen_vl_model
 
@@ -158,3 +159,36 @@ def get_encoder_components(
 
     else:
         raise NotImplementedError(f"Model not supported: {model_name}")
+
+
+def create_ec_transfer_config(
+    engine_id: str,
+    ec_role: str,
+    ec_connector_backend: str,
+    ec_connector_module_path: Optional[str] = None,
+):
+    """
+    Create ECTransferConfig for vLLM encoder cache.
+
+    Args:
+        engine_id: Unique identifier for this engine instance
+        ec_role: Role of this instance (e.g. "ec_both")
+        ec_connector_backend: ECConnector implementation class name
+        ec_connector_module_path: Python module path to dynamically load the connector from
+
+    Returns:
+        ECTransferConfig configured for the specified role
+    """
+
+    logger.info(
+        f"Creating ECTransferConfig: engine_id={engine_id}, role={ec_role}, "
+        f"backend={ec_connector_backend}, module_path={ec_connector_module_path}"
+    )
+
+    return ECTransferConfig(
+        engine_id=engine_id,
+        ec_role=ec_role,
+        ec_connector=ec_connector_backend,
+        ec_connector_extra_config={},
+        ec_connector_module_path=ec_connector_module_path,
+    )

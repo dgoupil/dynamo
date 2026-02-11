@@ -54,22 +54,31 @@ python -m dynamo.frontend &
 
 # Configure GPU memory optimization for specific models (if no extra args override)
 MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 16384"
-if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
-    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
-elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
+if [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
     MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
 elif [[ "$MODEL_NAME" == "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8" ]]; then
     MODEL_SPECIFIC_ARGS="--tensor-parallel-size=8 --gpu-memory-utilization 0.85 --max-model-len=108960"
 fi
 
+# Multimodal embedding cache capacity in GB (0 = disabled, >0 = ec_both mode)
+# When enabled, vLLM uses DynamoMultimodalEmbeddingCacheConnector to cache
+# encoder embeddings on CPU, skipping re-encoding for repeated images.
+DYN_MULTIMODAL_EMBEDDING_CACHE_CAPACITY_GB=${DYN_MULTIMODAL_EMBEDDING_CACHE_CAPACITY_GB:-0}
+
+# Build embedding cache args
+CACHE_ARGS=""
+if python3 -c "import sys; sys.exit(0 if float('$DYN_MULTIMODAL_EMBEDDING_CACHE_CAPACITY_GB') > 0 else 1)"; then
+    CACHE_ARGS="--dyn-multimodal-embedding-cache-capacity-gb $DYN_MULTIMODAL_EMBEDDING_CACHE_CAPACITY_GB"
+    echo "Embedding cache enabled: ${DYN_MULTIMODAL_EMBEDDING_CACHE_CAPACITY_GB} GB (ec_both mode)"
+fi
+
 # Start vLLM worker with vision model
 # Multimodal data (images) are decoded in the backend worker using ImageLoader
-# --enforce-eager: Quick deployment (remove for production)
 # --connector none: No KV transfer needed for aggregated serving
 # Extra args from command line come last to allow overrides
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME --connector none $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
+    python -m dynamo.vllm --enable-multimodal --multimodal-worker --model $MODEL_NAME --connector none --no-enable-prefix-caching $MODEL_SPECIFIC_ARGS $CACHE_ARGS "${EXTRA_ARGS[@]}"
 
 # Wait for all background processes to complete
 wait
