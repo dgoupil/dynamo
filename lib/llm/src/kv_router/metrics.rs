@@ -19,6 +19,12 @@ use prometheus::{IntGaugeVec, Opts};
 
 use crate::http::service::metrics::generate_log_buckets;
 
+/// Exponential buckets for routing overhead histograms:
+/// from 0.0001 ms (0.1 us) to ~26 ms, factor 2, 18 steps.
+fn overhead_buckets() -> Vec<f64> {
+    prometheus::exponential_buckets(0.0001, 2.0, 18).expect("exponential buckets should not fail")
+}
+
 // ---------------------------------------------------------------------------
 // Worker load metrics (gauges)
 // ---------------------------------------------------------------------------
@@ -101,42 +107,71 @@ pub struct RoutingOverheadMetrics {
     pub total: prometheus::Histogram,
 }
 
-pub static ROUTING_OVERHEAD_METRICS: LazyLock<RoutingOverheadMetrics> = LazyLock::new(|| {
-    // Buckets from 0.0001ms (0.1μs) to ~10ms, exponential with factor 2
-    let buckets = prometheus::exponential_buckets(0.0001, 2.0, 18)
-        .expect("exponential buckets should not fail");
-    let make = |suffix: &str, help: &str| {
-        let name = format!("{}_{}", name_prefix::ROUTING_OVERHEAD, suffix);
-        prometheus::Histogram::with_opts(
-            prometheus::HistogramOpts::new(name, help).buckets(buckets.clone()),
-        )
-        .expect("histogram creation should not fail")
-    };
-    RoutingOverheadMetrics {
-        block_hashing: make(
-            routing_overhead::BLOCK_HASHING_MS,
-            "Time spent computing block hashes in milliseconds",
-        ),
-        indexer_find_matches: make(
-            routing_overhead::INDEXER_FIND_MATCHES_MS,
-            "Time spent in indexer find_matches in milliseconds",
-        ),
-        seq_hashing: make(
-            routing_overhead::SEQ_HASHING_MS,
-            "Time spent computing sequence hashes in milliseconds",
-        ),
-        scheduling: make(
-            routing_overhead::SCHEDULING_MS,
-            "Time spent in scheduler worker selection in milliseconds",
-        ),
-        total: make(
-            routing_overhead::TOTAL_MS,
-            "Total routing overhead per request in milliseconds",
-        ),
-    }
-});
+static ROUTING_OVERHEAD_METRICS: OnceLock<Arc<RoutingOverheadMetrics>> = OnceLock::new();
 
 impl RoutingOverheadMetrics {
+    /// Create from a Component, memoized in a static OnceLock.
+    ///
+    /// Metric names use the `routing_overhead` constants (e.g. `overhead_block_hashing_ms`).
+    /// The `metrics().create_histogram()` API adds the `dynamo_component_` prefix and
+    /// auto-injects labels, so the emitted metric is e.g.
+    /// `dynamo_component_overhead_block_hashing_ms{dynamo_component="router", ...}`.
+    pub fn from_component(component: &Component) -> Arc<Self> {
+        ROUTING_OVERHEAD_METRICS
+            .get_or_init(|| {
+                let metrics = component.metrics();
+                let buckets = overhead_buckets();
+                let block_hashing = metrics
+                    .create_histogram(
+                        routing_overhead::BLOCK_HASHING_MS,
+                        "Time spent computing block hashes in milliseconds",
+                        &[],
+                        Some(buckets.clone()),
+                    )
+                    .expect("failed to create overhead_block_hashing_ms");
+                let indexer_find_matches = metrics
+                    .create_histogram(
+                        routing_overhead::INDEXER_FIND_MATCHES_MS,
+                        "Time spent in indexer find_matches in milliseconds",
+                        &[],
+                        Some(buckets.clone()),
+                    )
+                    .expect("failed to create overhead_indexer_find_matches_ms");
+                let seq_hashing = metrics
+                    .create_histogram(
+                        routing_overhead::SEQ_HASHING_MS,
+                        "Time spent computing sequence hashes in milliseconds",
+                        &[],
+                        Some(buckets.clone()),
+                    )
+                    .expect("failed to create overhead_seq_hashing_ms");
+                let scheduling = metrics
+                    .create_histogram(
+                        routing_overhead::SCHEDULING_MS,
+                        "Time spent in scheduler worker selection in milliseconds",
+                        &[],
+                        Some(buckets.clone()),
+                    )
+                    .expect("failed to create overhead_scheduling_ms");
+                let total = metrics
+                    .create_histogram(
+                        routing_overhead::TOTAL_MS,
+                        "Total routing overhead per request in milliseconds",
+                        &[],
+                        Some(buckets),
+                    )
+                    .expect("failed to create overhead_total_ms");
+                Arc::new(Self {
+                    block_hashing,
+                    indexer_find_matches,
+                    seq_hashing,
+                    scheduling,
+                    total,
+                })
+            })
+            .clone()
+    }
+
     /// Observe routing overhead timings in milliseconds.
     pub fn observe(
         &self,
@@ -163,19 +198,6 @@ impl RoutingOverheadMetrics {
             .observe(total_elapsed.saturating_sub(seq_hash_elapsed).as_secs_f64() * 1000.0);
         self.total.observe(total_elapsed.as_secs_f64() * 1000.0);
     }
-}
-
-/// Register the routing overhead histograms with the given Prometheus registry.
-pub fn register_routing_overhead_metrics(
-    registry: &prometheus::Registry,
-) -> Result<(), prometheus::Error> {
-    let m = &*ROUTING_OVERHEAD_METRICS;
-    registry.register(Box::new(m.block_hashing.clone()))?;
-    registry.register(Box::new(m.indexer_find_matches.clone()))?;
-    registry.register(Box::new(m.seq_hashing.clone()))?;
-    registry.register(Box::new(m.scheduling.clone()))?;
-    registry.register(Box::new(m.total.clone()))?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -213,49 +235,54 @@ impl RouterRequestMetrics {
     }
 
     /// Create from a Component, memoized in a static OnceLock.
+    ///
+    /// Metric names use the standard `frontend_service` constants (e.g. `requests_total`).
+    /// The `metrics().create*()` API adds the `dynamo_component_` prefix and auto-injects
+    /// `dynamo_namespace` / `dynamo_component` labels, so the emitted metric is e.g.
+    /// `dynamo_component_requests_total{dynamo_component="router", ...}`.
     pub fn from_component(component: &Component) -> Arc<Self> {
         ROUTER_REQUEST_METRICS
             .get_or_init(|| {
                 let metrics = component.metrics();
                 let requests_total = metrics
                     .create_intcounter(
-                        "router_requests_total",
+                        frontend_service::REQUESTS_TOTAL,
                         "Total number of requests processed by the router",
                         &[],
                     )
-                    .expect("failed to create router_requests_total");
+                    .expect("failed to create requests_total");
                 let time_to_first_token_seconds = metrics
                     .create_histogram(
-                        "router_time_to_first_token_seconds",
+                        frontend_service::TIME_TO_FIRST_TOKEN_SECONDS,
                         "Time to first token observed at the router",
                         &[],
                         Some(generate_log_buckets(0.001, 480.0, 18)),
                     )
-                    .expect("failed to create router_time_to_first_token_seconds");
+                    .expect("failed to create time_to_first_token_seconds");
                 let inter_token_latency_seconds = metrics
                     .create_histogram(
-                        "router_inter_token_latency_seconds",
+                        frontend_service::INTER_TOKEN_LATENCY_SECONDS,
                         "Average inter-token latency observed at the router",
                         &[],
                         Some(generate_log_buckets(0.001, 2.0, 13)),
                     )
-                    .expect("failed to create router_inter_token_latency_seconds");
+                    .expect("failed to create inter_token_latency_seconds");
                 let input_sequence_tokens = metrics
                     .create_histogram(
-                        "router_input_sequence_tokens",
+                        frontend_service::INPUT_SEQUENCE_TOKENS,
                         "Input sequence length in tokens observed at the router",
                         &[],
                         Some(generate_log_buckets(50.0, 128000.0, 12)),
                     )
-                    .expect("failed to create router_input_sequence_tokens");
+                    .expect("failed to create input_sequence_tokens");
                 let output_sequence_tokens = metrics
                     .create_histogram(
-                        "router_output_sequence_tokens",
+                        frontend_service::OUTPUT_SEQUENCE_TOKENS,
                         "Output sequence length in tokens observed at the router",
                         &[],
                         Some(generate_log_buckets(50.0, 32000.0, 10)),
                     )
-                    .expect("failed to create router_output_sequence_tokens");
+                    .expect("failed to create output_sequence_tokens");
                 Arc::new(Self::new(
                     requests_total,
                     time_to_first_token_seconds,
@@ -335,34 +362,34 @@ dynamo_frontend_worker_active_prefill_tokens{dp_rank=\"0\",worker_id=\"123\",wor
 
     #[test]
     fn test_routing_overhead_metric_names_pef() {
+        // Verify the overhead constants produce valid histogram names when
+        // combined with dynamo_component_ (simulated here with a manual prefix).
         let registry = prometheus::Registry::new();
-        let buckets = prometheus::exponential_buckets(0.0001, 2.0, 18).unwrap();
-        let make = |suffix: &str, help: &str| {
-            let name = format!("{}_{}", name_prefix::ROUTING_OVERHEAD, suffix);
-            prometheus::Histogram::with_opts(
-                prometheus::HistogramOpts::new(name, help).buckets(buckets.clone()),
+        let buckets = overhead_buckets();
+        let prefix = name_prefix::COMPONENT;
+        let name = format!("{}_{}", prefix, routing_overhead::TOTAL_MS);
+        let total = prometheus::Histogram::with_opts(
+            prometheus::HistogramOpts::new(
+                name,
+                "Total routing overhead per request in milliseconds",
             )
-            .unwrap()
-        };
-
-        let total = make(
-            routing_overhead::TOTAL_MS,
-            "Total routing overhead per request in milliseconds",
-        );
+            .buckets(buckets),
+        )
+        .unwrap();
         registry.register(Box::new(total.clone())).unwrap();
         total.observe(1.5);
 
         let output = gather_pef(&registry);
         assert!(
-            output.contains("# HELP dynamo_routing_overhead_total_ms"),
+            output.contains("# HELP dynamo_component_overhead_total_ms"),
             "PEF missing HELP for routing overhead metric"
         );
         assert!(
-            output.contains("# TYPE dynamo_routing_overhead_total_ms histogram"),
+            output.contains("# TYPE dynamo_component_overhead_total_ms histogram"),
             "PEF missing TYPE for routing overhead metric"
         );
         assert!(
-            output.contains("dynamo_routing_overhead_total_ms_count 1"),
+            output.contains("dynamo_component_overhead_total_ms_count 1"),
             "PEF missing observation count"
         );
     }

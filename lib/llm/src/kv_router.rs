@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use dynamo_runtime::{
-    component::{Client, Endpoint},
+    component::{Client, Component, Endpoint},
     discovery::DiscoveryQuery,
+    metrics::prometheus_names::component_names,
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
         async_trait,
@@ -208,6 +209,9 @@ pub struct KvRouter {
     kv_router_config: KvRouterConfig,
     cancellation_token: tokio_util::sync::CancellationToken,
     client: Client,
+    /// Dedicated component for router metrics so they get `dynamo_component="router"`
+    /// instead of inheriting the backend worker's component name.
+    router_component: Component,
 }
 
 impl KvRouter {
@@ -226,6 +230,10 @@ impl KvRouter {
         kv_router_config.validate()?;
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
+
+        // Create a dedicated "router" component so that metrics created via
+        // metrics().create*() get dynamo_component="router" labels.
+        let router_component = component.namespace().component(component_names::ROUTER)?;
 
         let indexer = Indexer::new(
             component,
@@ -286,12 +294,18 @@ impl KvRouter {
             kv_router_config,
             cancellation_token,
             client,
+            router_component,
         })
     }
 
     /// Get a reference to the client used by this KvRouter
     pub fn client(&self) -> &Client {
         &self.client
+    }
+
+    /// Dedicated component for router metrics (`dynamo_component="router"`).
+    pub fn router_component(&self) -> &Component {
+        &self.router_component
     }
 
     pub fn indexer(&self) -> &Indexer {
@@ -348,7 +362,7 @@ impl KvRouter {
             .await?;
         let total_elapsed = start.elapsed();
 
-        metrics::ROUTING_OVERHEAD_METRICS.observe(
+        metrics::RoutingOverheadMetrics::from_component(&self.router_component).observe(
             hash_elapsed,
             find_matches_elapsed,
             seq_hash_elapsed,

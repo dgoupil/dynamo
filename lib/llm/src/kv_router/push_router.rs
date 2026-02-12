@@ -221,8 +221,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         // Record routing metrics on tracker and observe ISL + prefill start.
-        let request_metrics =
-            RouterRequestMetrics::from_component(self.chooser.client().endpoint.component());
+        let request_metrics = RouterRequestMetrics::from_component(self.chooser.router_component());
         if let Some(ref tracker) = request.tracker {
             let isl_blocks = request.token_ids.len().div_ceil(block_size);
             tracker.record_kv_hit(overlap_amount, isl_blocks);
