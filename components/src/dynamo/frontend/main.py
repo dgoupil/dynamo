@@ -331,6 +331,12 @@ def parse_args():
         help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
+        "--enable-anthropic-api",
+        action="store_true",
+        default=False,
+        help="[EXPERIMENTAL] Enable Anthropic Messages API endpoint (/v1/messages). This feature is experimental and may change.",
+    )
+    parser.add_argument(
         "--chat-processor",
         dest="chat_processor",
         type=str,
@@ -471,6 +477,9 @@ async def async_main():
         kwargs["namespace"] = flags.namespace
     if flags.kserve_grpc_server and flags.grpc_metrics_port:
         kwargs["http_metrics_port"] = flags.grpc_metrics_port
+
+    if flags.enable_anthropic_api:
+        os.environ["DYN_ENABLE_ANTHROPIC_API"] = "1"
 
     if flags.chat_processor == "vllm":
         chat_engine_factory = setup_engine_factory(
