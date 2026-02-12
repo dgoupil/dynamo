@@ -24,6 +24,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -161,6 +162,118 @@ func TestDGDDefaulter_Default(t *testing.T) {
 			if got != tt.wantAnnotation {
 				t.Errorf("annotation %q = %q, want %q",
 					consts.KubeAnnotationDynamoOperatorOriginVersion, got, tt.wantAnnotation)
+			}
+		})
+	}
+}
+
+func TestInitExtraPodSpecContainers(t *testing.T) {
+	tests := []struct {
+		name string
+		dgd  *nvidiacomv1alpha1.DynamoGraphDeployment
+		// serviceName -> whether Containers should be non-nil after init
+		wantNonNil map[string]bool
+	}{
+		{
+			name: "nil Containers becomes empty slice",
+			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {
+							ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+								PodSpec: &corev1.PodSpec{
+									// Containers is nil (zero value)
+								},
+							},
+						},
+					},
+				},
+			},
+			wantNonNil: map[string]bool{"Frontend": true},
+		},
+		{
+			name: "already-set Containers is not modified",
+			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Worker": {
+							ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+								PodSpec: &corev1.PodSpec{
+									Containers: []corev1.Container{{Name: "sidecar"}},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantNonNil: map[string]bool{"Worker": true},
+		},
+		{
+			name: "nil ExtraPodSpec is skipped",
+			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Router": {},
+					},
+				},
+			},
+			wantNonNil: map[string]bool{},
+		},
+		{
+			name: "nil PodSpec is skipped",
+			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {
+							ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+								MainContainer: &corev1.Container{Name: "main"},
+								// PodSpec is nil
+							},
+						},
+					},
+				},
+			},
+			wantNonNil: map[string]bool{},
+		},
+		{
+			name: "multiple services mixed",
+			dgd: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {
+							ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+								PodSpec: &corev1.PodSpec{}, // nil Containers
+							},
+						},
+						"Worker": {
+							ExtraPodSpec: &nvidiacomv1alpha1.ExtraPodSpec{
+								PodSpec: &corev1.PodSpec{
+									Containers: []corev1.Container{{Name: "c"}},
+								},
+							},
+						},
+						"Router": {}, // nil ExtraPodSpec
+					},
+				},
+			},
+			wantNonNil: map[string]bool{"Frontend": true, "Worker": true},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initExtraPodSpecContainers(tt.dgd)
+
+			for svcName, svc := range tt.dgd.Spec.Services {
+				if svc == nil || svc.ExtraPodSpec == nil || svc.ExtraPodSpec.PodSpec == nil {
+					if tt.wantNonNil[svcName] {
+						t.Errorf("service %q: expected non-nil Containers", svcName)
+					}
+					continue
+				}
+				if tt.wantNonNil[svcName] && svc.ExtraPodSpec.PodSpec.Containers == nil {
+					t.Errorf("service %q: Containers should be non-nil", svcName)
+				}
 			}
 		})
 	}

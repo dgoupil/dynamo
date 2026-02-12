@@ -21,9 +21,12 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/go-logr/logr"
+
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -60,6 +63,13 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 		return fmt.Errorf("expected DynamoGraphDeployment but got %T", obj)
 	}
 
+	// Initialize nil Containers slices to empty in all ExtraPodSpecs.
+	// corev1.PodSpec.Containers lacks `omitempty`, so nil slices serialize as
+	// "containers": null during the CustomDefaulter round-trip, which the CRD
+	// schema rejects (type: array does not accept null).
+	// Setting to an empty slice produces "containers": [] instead.
+	initExtraPodSpecContainers(dgd)
+
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {
 		logger.Error(err, "failed to get admission request from context, skipping defaulting")
@@ -67,20 +77,41 @@ func (d *DGDDefaulter) Default(ctx context.Context, obj runtime.Object) error {
 	}
 
 	if req.Operation == admissionv1.Create {
-		if dgd.Annotations == nil {
-			dgd.Annotations = make(map[string]string)
-		}
-		// Stamp operator version on creation (don't overwrite if already set)
-		if _, exists := dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; !exists {
-			dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
-			logger.Info("stamped operator origin version on DGD",
-				"name", dgd.Name,
-				"namespace", dgd.Namespace,
-				"version", d.OperatorVersion)
-		}
+		d.stampOperatorOriginVersion(dgd, logger)
 	}
 
 	return nil
+}
+
+// stampOperatorOriginVersion sets the operator origin version annotation on the
+// DGD if it is not already present. This annotation is used by the controller
+// to gate version-dependent behavior changes (e.g. vLLM multiprocessing).
+func (d *DGDDefaulter) stampOperatorOriginVersion(dgd *nvidiacomv1alpha1.DynamoGraphDeployment, logger logr.Logger) {
+	if dgd.Annotations == nil {
+		dgd.Annotations = make(map[string]string)
+	}
+	if _, exists := dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion]; !exists {
+		dgd.Annotations[consts.KubeAnnotationDynamoOperatorOriginVersion] = d.OperatorVersion
+		logger.Info("stamped operator origin version on DGD",
+			"name", dgd.Name,
+			"namespace", dgd.Namespace,
+			"version", d.OperatorVersion)
+	}
+}
+
+// initExtraPodSpecContainers ensures that any nil Containers slice inside an
+// ExtraPodSpec is replaced with an empty slice. This prevents the
+// CustomDefaulter JSON round-trip from producing "containers": null, which
+// fails CRD structural schema validation.
+func initExtraPodSpecContainers(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) {
+	for _, svc := range dgd.Spec.Services {
+		if svc == nil || svc.ExtraPodSpec == nil || svc.ExtraPodSpec.PodSpec == nil {
+			continue
+		}
+		if svc.ExtraPodSpec.PodSpec.Containers == nil {
+			svc.ExtraPodSpec.PodSpec.Containers = []corev1.Container{}
+		}
+	}
 }
 
 // RegisterWithManager registers the defaulting webhook with the manager.
