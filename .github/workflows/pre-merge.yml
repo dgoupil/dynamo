@@ -59,6 +59,16 @@ jobs:
     steps:
     - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
     - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+    - name: Dump isort config (for comparison with local)
+      run: |
+        pip install isort==5.12.0 toml --quiet
+        isort . --show-config --settings-path pyproject.toml > isort-config-ci.json
+        echo "=== isort effective config in CI ==="
+        cat isort-config-ci.json
+    - uses: actions/upload-artifact@v4
+      with:
+        name: isort-config-ci
+        path: isort-config-ci.json
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       timeout-minutes: 3
 
