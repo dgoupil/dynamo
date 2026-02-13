@@ -43,7 +43,7 @@ from dynamo.llm import (
     ModelRuntimeConfig,
     ModelType,
     ZmqKvEventPublisherConfig,
-    register_llm,
+    register_model,
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.trtllm.constants import DisaggregationMode
@@ -438,7 +438,7 @@ async def init_llm_worker(
         # Encode workers do NOT register - they're internal workers only
         # Prefill and decode workers register - frontend detects their role via ModelType
         if config.disaggregation_mode != DisaggregationMode.ENCODE:
-            await register_llm(
+            await register_model(
                 model_input,
                 model_type,
                 endpoint,

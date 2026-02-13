@@ -138,8 +138,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
-    m.add_function(wrap_pyfunction!(register_llm, m)?)?;
-    m.add_function(wrap_pyfunction!(unregister_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(register_model, m)?)?;
+    m.add_function(wrap_pyfunction!(unregister_model, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
@@ -226,7 +226,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 #[pyfunction]
 #[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
 #[allow(clippy::too_many_arguments)]
-fn register_llm<'p>(
+fn register_model<'p>(
     py: Python<'p>,
     model_input: ModelInput,
     model_type: ModelType,
@@ -406,7 +406,7 @@ fn register_llm<'p>(
 /// - LoRA model: `v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}`
 #[pyfunction]
 #[pyo3(signature = (endpoint, lora_name=None))]
-fn unregister_llm<'p>(
+fn unregister_model<'p>(
     py: Python<'p>,
     endpoint: Endpoint,
     lora_name: Option<&str>,

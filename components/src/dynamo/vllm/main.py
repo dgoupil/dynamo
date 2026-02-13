@@ -30,7 +30,7 @@ from dynamo.llm import (
     ModelType,
     ZmqKvEventPublisherConfig,
     fetch_model,
-    register_llm,
+    register_model,
 )
 
 # Optional imports for frontend decoding support
@@ -518,7 +518,7 @@ async def register_vllm_model(
         media_fetcher.timeout_ms(30000)
         media_fetcher.allow_direct_port(True)
 
-    await register_llm(
+    await register_model(
         model_input,
         model_type,
         generate_endpoint,
@@ -951,10 +951,10 @@ async def init_multimodal_processor(
     )
 
     logger.info("Waiting for Encoder Worker Instances ...")
-    await encode_worker_client.wait_for_instances()
+    await encode_worker_client.wait_for_instances(    )
 
     # Register the endpoint as entrypoint to a model
-    await register_llm(
+    await register_model(
         ModelInput.Tokens,
         ModelType.Chat,
         generate_endpoint,
@@ -1142,7 +1142,7 @@ async def init_ec_processor(
     await pd_client.wait_for_instances()
 
     # Register the endpoint as entrypoint to a model (same as preprocessed_handler)
-    await register_llm(
+    await register_model(
         ModelInput.Tokens,  # Use Rust tokenization for better performance and multi-image support
         ModelType.Chat,
         generate_endpoint,
@@ -1325,7 +1325,7 @@ async def init_omni(
         return
 
     # TODO: extend for multi-stage pipelines
-    await register_llm(
+    await register_model(
         ModelInput.Text,
         ModelType.Images,
         generate_endpoint,
