@@ -29,7 +29,7 @@ from dynamo.llm import (
     ModelRuntimeConfig,
     ModelType,
     ZmqKvEventPublisherConfig,
-    fetch_llm,
+    fetch_model,
     register_llm,
 )
 
@@ -114,14 +114,14 @@ async def worker():
     # Download the model if necessary using modelexpress.
     # We want it on disk before we start vllm to avoid downloading from HuggingFace.
     #
-    # We don't set `config.engine_args.model` to the local path fetch_llm returns
+    # We don't set `config.engine_args.model` to the local path fetch_model returns
     # because vllm will send that name to its Ray pipeline-parallel workers, which
     # may not have the local path.
     # vllm will attempt to download the model again, but find it in the HF cache.
     # For non-HF models use a path instead of an HF name, and ensure all workers have
     # that path (ideally via a shared folder).
     if not os.path.exists(config.model):
-        await fetch_llm(config.model)
+        await fetch_model(config.model)
 
     # CHECKPOINT MODE: Load engine BEFORE runtime creation
     # This allows checkpointing GPU state before runtime connections are established

@@ -140,7 +140,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_llm, m)?)?;
-    m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_model, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
@@ -423,10 +423,10 @@ fn unregister_llm<'p>(
 }
 
 /// Download a model from Hugging Face, returning it's local path
-/// Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
+/// Example: `model_path = await fetch_model("Qwen/Qwen3-0.6B")`
 #[pyfunction]
 #[pyo3(signature = (remote_name, ignore_weights=false))]
-fn fetch_llm<'p>(
+fn fetch_model<'p>(
     py: Python<'p>,
     remote_name: &str,
     ignore_weights: bool,
