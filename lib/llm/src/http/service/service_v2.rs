@@ -18,7 +18,9 @@ use super::metrics;
 use super::metrics::register_worker_timing_metrics;
 use crate::discovery::ModelManager;
 use crate::endpoint_type::EndpointType;
-use crate::kv_router::metrics::register_worker_load_metrics;
+use crate::kv_router::metrics::{
+    RouterRequestMetrics, RoutingOverheadMetrics, register_worker_load_metrics,
+};
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
@@ -206,6 +208,11 @@ pub struct HttpServiceConfig {
     /// DRT's registry tree (anything created via `metrics().create*()`).
     #[builder(default = "None")]
     drt_metrics: Option<dynamo_runtime::metrics::MetricsRegistry>,
+
+    /// When set (e.g. DRT discovery), router metrics (dynamo_router_* with router_id label)
+    /// are registered using discovery.instance_id() and exposed on /metrics.
+    #[builder(default = "None")]
+    drt_discovery: Option<Arc<dyn Discovery>>,
 }
 
 impl HttpService {
@@ -395,6 +402,16 @@ impl HttpServiceConfigBuilder {
         // These are updated by ResponseMetricCollector when observing TTFT/ITL
         if let Err(e) = register_worker_timing_metrics(&registry) {
             tracing::warn!("Failed to register worker timing metrics: {}", e);
+        }
+
+        if let Some(ref discovery) = config.drt_discovery {
+            let instance_id = discovery.instance_id();
+            if let Err(e) = RouterRequestMetrics::register(&registry, instance_id) {
+                tracing::warn!("Failed to register router request metrics: {}", e);
+            }
+            if let Err(e) = RoutingOverheadMetrics::register(&registry, instance_id) {
+                tracing::warn!("Failed to register routing overhead metrics: {}", e);
+            }
         }
 
         let mut router = axum::Router::new();

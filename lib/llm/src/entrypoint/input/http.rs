@@ -53,9 +53,12 @@ pub async fn run(
         http_service_builder.with_request_template(engine_config.local_model().request_template());
 
     // Inject the DRT's metrics registry so that component-scoped metrics
-    // (e.g. RouterRequestMetrics, KvIndexerMetrics) are exposed on port 8000.
+    // (e.g. KvIndexerMetrics) are exposed (default port 8000 if not overridden).
     http_service_builder =
         http_service_builder.drt_metrics(Some(distributed_runtime.get_metrics_registry().clone()));
+    // Router metrics (dynamo_router_* with router_id label) use discovery.instance_id().
+    http_service_builder =
+        http_service_builder.drt_discovery(Some(distributed_runtime.discovery()));
 
     let http_service = match engine_config {
         EngineConfig::Dynamic {

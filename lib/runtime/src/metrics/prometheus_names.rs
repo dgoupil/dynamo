@@ -68,6 +68,9 @@ pub mod name_prefix {
 
     /// Prefix for frontend service metrics
     pub const FRONTEND: &str = "dynamo_frontend";
+
+    /// Prefix for KV router metrics (used with router_id label)
+    pub const ROUTER: &str = "dynamo_router";
 }
 
 /// Automatically inserted Prometheus label names used across the metrics system
@@ -109,6 +112,9 @@ pub mod labels {
 
     /// Label for worker type (e.g., "aggregated", "prefill", "decode", "encoder", etc.)
     pub const WORKER_TYPE: &str = "worker_type";
+
+    /// Label for router instance (discovery.instance_id() of the frontend)
+    pub const ROUTER_ID: &str = "router_id";
 }
 
 /// Well-known component names used as values for the `dynamo_component` label.

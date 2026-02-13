@@ -271,38 +271,37 @@ curl http://localhost:8000/metrics
 
 These are created on first request. If no requests have been routed yet, these metrics will not appear in the output.
 
-They all carry the label `dynamo_component="router"` so you can filter them in Prometheus with:
+They use the `dynamo_router_*` prefix and carry a constant label `router_id` (the frontend's discovery instance ID). Filter in Prometheus with:
 
 ```promql
-dynamo_component_requests_total{dynamo_component="router"}
+dynamo_router_requests_total{router_id="12345"}
 ```
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `dynamo_component_requests_total` | Counter | Total requests processed by the router |
-| `dynamo_component_time_to_first_token_seconds` | Histogram | Time to first token (seconds) |
-| `dynamo_component_inter_token_latency_seconds` | Histogram | Average inter-token latency (seconds) |
-| `dynamo_component_input_sequence_tokens` | Histogram | Input sequence length (tokens) |
-| `dynamo_component_output_sequence_tokens` | Histogram | Output sequence length (tokens) |
+| `dynamo_router_requests_total` | Counter | Total requests processed by the router |
+| `dynamo_router_time_to_first_token_seconds` | Histogram | Time to first token (seconds) |
+| `dynamo_router_inter_token_latency_seconds` | Histogram | Average inter-token latency (seconds) |
+| `dynamo_router_input_sequence_tokens` | Histogram | Input sequence length (tokens) |
+| `dynamo_router_output_sequence_tokens` | Histogram | Output sequence length (tokens) |
 
 **Labels on every metric above:**
 
 | Label | Example Value | Description |
 |-------|---------------|-------------|
-| `dynamo_component` | `router` | Always `router` for these metrics |
-| `dynamo_namespace` | `dynamo` | Dynamo runtime namespace |
+| `router_id` | `12345` | Frontend discovery instance ID (`discovery.instance_id()`) |
 
 ### Routing Overhead Metrics
 
-Per-request latency breakdown of the routing decision pipeline (milliseconds). Created on first routing decision. Same `dynamo_component="router"` and `dynamo_namespace="dynamo"` labels as the request metrics above.
+Per-request latency breakdown of the routing decision pipeline (milliseconds). Created on first routing decision. Same `router_id` label as the request metrics above.
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `dynamo_component_overhead_block_hashing_ms` | Histogram | Time computing block hashes |
-| `dynamo_component_overhead_indexer_find_matches_ms` | Histogram | Time in indexer find_matches |
-| `dynamo_component_overhead_seq_hashing_ms` | Histogram | Time computing sequence hashes |
-| `dynamo_component_overhead_scheduling_ms` | Histogram | Time in scheduler worker selection |
-| `dynamo_component_overhead_total_ms` | Histogram | Total routing overhead per request |
+| `dynamo_router_overhead_block_hashing_ms` | Histogram | Time computing block hashes |
+| `dynamo_router_overhead_indexer_find_matches_ms` | Histogram | Time in indexer find_matches |
+| `dynamo_router_overhead_seq_hashing_ms` | Histogram | Time computing sequence hashes |
+| `dynamo_router_overhead_scheduling_ms` | Histogram | Time in scheduler worker selection |
+| `dynamo_router_overhead_total_ms` | Histogram | Total routing overhead per request |
 
 ### KV Indexer Metrics
 
